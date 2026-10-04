@@ -1,0 +1,89 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+/* Тема только светлая. Вариант dark объявлен, но переопределений токенов нет:
+   так утилиты dark:* компилируются и остаются мёртвыми, вместо того чтобы
+   срабатывать от системной темы и ломать палитру. */
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+    --font-heading: var(--font-sans);
+    --font-sans: var(--font-inter);
+    --color-ring: var(--ring);
+    --color-input: var(--input);
+    --color-border: var(--border);
+    --color-destructive: var(--destructive);
+    --color-accent-foreground: var(--accent-foreground);
+    --color-accent: var(--accent);
+    --color-muted-foreground: var(--muted-foreground);
+    --color-muted: var(--muted);
+    --color-secondary-foreground: var(--secondary-foreground);
+    --color-secondary: var(--secondary);
+    --color-primary-foreground: var(--primary-foreground);
+    --color-primary: var(--primary);
+    --color-popover-foreground: var(--popover-foreground);
+    --color-popover: var(--popover);
+    --color-card-foreground: var(--card-foreground);
+    --color-card: var(--card);
+    --color-foreground: var(--foreground);
+    --color-background: var(--background);
+    --radius-sm: calc(var(--radius) * 0.6);
+    --radius-md: calc(var(--radius) * 0.8);
+    --radius-lg: var(--radius);
+    --radius-xl: calc(var(--radius) * 1.4);
+    --radius-2xl: calc(var(--radius) * 1.8);
+    --radius-3xl: calc(var(--radius) * 2.2);
+    --radius-4xl: calc(var(--radius) * 2.6);
+}
+
+/* Calm cyan-green (health-tech). Единственное место, где живут цвета:
+   в компонентах используются только семантические классы Tailwind.
+   Контраст проверен под WCAG AA: foreground/background 11.4:1,
+   muted-foreground/background 4.9:1, primary-foreground/primary 5.4:1. */
+:root {
+    --background: #f5fbfc;
+    --foreground: #123c49;
+    --card: #ffffff;
+    --card-foreground: #123c49;
+    --popover: #ffffff;
+    --popover-foreground: #123c49;
+    --primary: #0e7490;
+    --primary-foreground: #ffffff;
+    --secondary: #e0f2f4;
+    --secondary-foreground: #0f4c5c;
+    --muted: #e8f4f6;
+    --muted-foreground: #4a7384;
+    --accent: #d7eef1;
+    --accent-foreground: #0f4c5c;
+    --destructive: #b42318;
+    --border: #cfe3e8;
+    --input: #cfe3e8;
+    --ring: #0e7490;
+    --radius: 0.625rem;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+    }
+  body {
+    @apply bg-background text-foreground;
+    }
+  html {
+    @apply font-sans;
+    }
+}
+
+/* Движение — только как подсказка о состоянии, поэтому при prefers-reduced-motion
+   анимации и переходы гасятся целиком, а не замедляются. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
