@@ -1,8 +1,9 @@
-import { CheckCircle2, PencilLine, Stethoscope, type LucideIcon } from "lucide-react";
+import { CheckCircle2, PencilLine, Stethoscope, TrendingUp, type LucideIcon } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
-import type { Review } from "@/src/agents/safetyReviewer";
+import type { RoundState } from "@/src/harness/rounds";
+import type { Review } from "@/src/harness/validateReview";
 
 export type Verdict = Review["verdict"];
 
@@ -109,5 +110,73 @@ export function RoundsIndicator({ rounds, className }: { rounds: number; classNa
         ))}
       </div>
     </div>
+  );
+}
+
+/** 98300 → «1 мин 38 с», 42000 → «42 с». */
+export function formatDuration(durationMs: number): string {
+  const totalSeconds = Math.max(0, Math.round(durationMs / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return minutes > 0 ? `${minutes} мин ${seconds} с` : `${seconds} с`;
+}
+
+/** Длительность прогона и версии промптов — то, чем прогон отличается от соседнего. */
+export function RunMeta({
+  durationMs,
+  promptVersions,
+  className,
+}: {
+  durationMs: number;
+  promptVersions: { coach: string; reviewer: string };
+  className?: string;
+}) {
+  return (
+    <p className={cn("text-muted-foreground text-sm", className)}>
+      Прогон {formatDuration(durationMs)} · промпты: coach {promptVersions.coach}, reviewer{" "}
+      {promptVersions.reviewer}
+    </p>
+  );
+}
+
+/**
+ * История раундов, свёрнутая по умолчанию: в норме интересен только итог,
+ * а раскладка по раундам нужна, когда план пришёл не с первого раза.
+ */
+export function RoundsHistory({
+  rounds,
+  improved,
+  className,
+}: {
+  rounds: RoundState[];
+  improved: boolean;
+  className?: string;
+}) {
+  if (rounds.length === 0) return null;
+
+  return (
+    <details className={cn("group", className)}>
+      <summary className="text-muted-foreground hover:text-foreground focus-visible:ring-ring/50 cursor-pointer rounded-md text-sm transition-colors focus-visible:ring-3 focus-visible:outline-none">
+        История раундов ({rounds.length})
+      </summary>
+      <ul className="mt-3 space-y-2">
+        {rounds.map((state, index) => {
+          const isLast = index === rounds.length - 1;
+          return (
+            <li key={state.round} className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
+              <span className="text-muted-foreground tabular-nums">Раунд {state.round}</span>
+              <VerdictBadge verdict={state.review.verdict} />
+              <span className="tabular-nums">{state.review.score}/10</span>
+              {isLast && improved && (
+                <span className="inline-flex items-center gap-1 text-emerald-800">
+                  <TrendingUp className="size-3.5" aria-hidden="true" />
+                  оценка выросла
+                </span>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+    </details>
   );
 }

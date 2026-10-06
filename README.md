@@ -26,11 +26,16 @@ app/layout.tsx                корневой layout: шрифт Inter, globals
 app/globals.css               Tailwind v4 и токены темы
 app/api/agent/run/route.ts    POST { task } → { plan, review, rounds }
 components/ui/*               примитивы shadcn/ui
-components/health/review-widgets.tsx  VerdictBadge, ScoreMeter, RoundsIndicator
+components/health/review-widgets.tsx  виджеты ревью, история раундов, метаданные прогона
 lib/utils.ts                  cn(): clsx + tailwind-merge
-src/agents/healthCoach.ts     агент-коуч: промпт + модель
-src/agents/safetyReviewer.ts  агент-ревьюер: промпт, модель, схема и парсинг JSON
-src/harness/runHealthAgent.ts настройка провайдера и цикл коуч ↔ ревьюер
+prompts/*.v1.md               системные промпты агентов, по файлу на версию
+src/agents/healthCoach.ts     фабрика агента-коуча: имя и модель
+src/agents/safetyReviewer.ts  фабрика агента-ревьюера: имя и модель
+src/harness/runHealthAgent.ts оркестратор: провайдер, цикл коуч ↔ ревьюер, трейс
+src/harness/validateReview.ts схема ревью, разбор JSON и один ретрай
+src/harness/rounds.ts         RoundState и история раундов
+src/harness/score.ts          итоговый score и флаг improved
+src/harness/promptVersions.ts загрузка промптов и ACTIVE_PROMPTS
 data/profile.md               профиль пользователя (вход)
 data/log.md                   дневник (вход)
 data/output.md                последний одобренный план (выход)
@@ -49,7 +54,28 @@ data/output.md                последний одобренный план (
    - `revise` — замечания уходят коучу на следующий раунд; если три раунда прошли
      без одобрения, UI показывает последний план с вердиктом `revise`.
 
-Ответ API: `{ plan: string | null, review: { verdict, score, issues }, rounds: number }`.
+Ответ API:
+
+```ts
+{
+  plan: string | null,
+  review: { verdict, score, issues },   // ревью последнего раунда
+  rounds: { round, plan, review }[],    // трейс всех раундов
+  finalScore: number | null,            // score последнего approve
+  improved: boolean,                    // вырос ли score на последней ревизии
+  promptVersions: { coach: string, reviewer: string },
+  durationMs: number
+}
+```
+
+`maxRounds` — второй параметр `runHealthAgent(task, maxRounds = 3)`.
+
+## Версии промптов
+
+Промпты агентов лежат в `prompts/<agent>.<version>.md`, активные версии задаёт
+`ACTIVE_PROMPTS` в `src/harness/promptVersions.ts`. Чтобы поменять поведение агента,
+не трогая код: положить рядом `healthCoach.v2.md` и переключить константу. Версия,
+которой отработал прогон, возвращается в `promptVersions` и видна в UI.
 
 ## Что изменилось при переносе из V0
 

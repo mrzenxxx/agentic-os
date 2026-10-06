@@ -10,7 +10,14 @@ import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
-import { RoundsIndicator, ScoreMeter, VerdictBadge, verdictConfig } from "@/components/health/review-widgets";
+import {
+  RoundsHistory,
+  RoundsIndicator,
+  RunMeta,
+  ScoreMeter,
+  VerdictBadge,
+  verdictConfig,
+} from "@/components/health/review-widgets";
 import type { HealthAgentResult } from "@/src/harness/runHealthAgent";
 
 type State =
@@ -178,7 +185,7 @@ function RunningState() {
 }
 
 function Result({ result }: { result: HealthAgentResult }) {
-  const { plan, review, rounds } = result;
+  const { plan, review, rounds, improved, promptVersions, durationMs } = result;
   const needsProfessional = review.verdict === "needs_human_professional";
 
   return (
@@ -206,7 +213,7 @@ function Result({ result }: { result: HealthAgentResult }) {
         <CardContent className="space-y-5">
           <div className="grid gap-5 sm:grid-cols-2">
             <ScoreMeter score={review.score} />
-            <RoundsIndicator rounds={rounds} />
+            <RoundsIndicator rounds={rounds.length} />
           </div>
 
           <Separator />
@@ -223,6 +230,13 @@ function Result({ result }: { result: HealthAgentResult }) {
           ) : (
             <p className="text-muted-foreground text-sm">Замечаний нет</p>
           )}
+
+          <Separator />
+
+          <div className="space-y-3">
+            <RunMeta durationMs={durationMs} promptVersions={promptVersions} />
+            <RoundsHistory rounds={rounds} improved={improved} />
+          </div>
         </CardContent>
       </Card>
 

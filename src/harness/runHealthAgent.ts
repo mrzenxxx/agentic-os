@@ -9,8 +9,22 @@ import {
   setOpenAIAPI,
   setTracingDisabled,
 } from "@openai/agents";
-import { coach } from "../agents/healthCoach";
-import { parseReview, reviewer, type Review } from "../agents/safetyReviewer";
+
+import { createHealthCoach } from "../agents/healthCoach";
+import { createSafetyReviewer } from "../agents/safetyReviewer";
+import { ACTIVE_PROMPTS, loadPrompt, type PromptVersions } from "./promptVersions";
+import { createRoundsLog, type RoundState } from "./rounds";
+import { finalScore, improved } from "./score";
+import { requestReview, type Review } from "./validateReview";
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ОРКЕСТРАТОР
+//
+// Собирает прогон из модулей харнесса: берёт версии промптов, строит агентов,
+// крутит цикл коуч ↔ ревьюер и складывает трейс. Вся проверка ответа ревьюера
+// живёт в validateReview, история раундов — в rounds, выводы по оценкам — в
+// score. Здесь остаются только связывание, развилка по вердикту и запись файла.
+// ─────────────────────────────────────────────────────────────────────────────
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ПРОВАЙДЕР: OpenRouter через OpenAI-совместимый API
@@ -80,48 +94,80 @@ async function ask(agent: Agent, input: string): Promise<string> {
 }
 
 // Контекст и результат лежат в data/, пути считаем от корня проекта —
-// и CLI, и Next.js запускаются оттуда.
+// и dev-сервер, и production-сборка запускаются оттуда.
 const dataPath = (file: string) => join(process.cwd(), "data", file);
+
+const DEFAULT_MAX_ROUNDS = 3;
 
 export type HealthAgentResult = {
   /** Финальный план. null — если вердикт needs_human_professional: план не отдаём. */
   plan: string | null;
+  /** Ревью последнего раунда — по нему принято решение. */
   review: Review;
-  /** Сколько раундов коуч↔ревьюер понадобилось. */
-  rounds: number;
+  /** Трейс прогона: каждый раунд с планом и его ревью. */
+  rounds: RoundState[];
+  /** Score последнего одобренного раунда; null, если approve не случился. */
+  finalScore: number | null;
+  /** Вырос ли score на последней ревизии относительно предыдущего раунда. */
+  improved: boolean;
+  /** Версии промптов, которыми фактически отработал прогон. */
+  promptVersions: PromptVersions;
+  /** Длительность прогона целиком, включая чтение файлов и запись output.md. */
+  durationMs: number;
 };
 
-export async function runHealthAgent(task: string): Promise<HealthAgentResult> {
+export async function runHealthAgent(
+  task: string,
+  maxRounds: number = DEFAULT_MAX_ROUNDS,
+): Promise<HealthAgentResult> {
+  const startedAt = Date.now();
   ensureProvider();
+
+  // Версии промптов фиксируем один раз на прогон: даже если ACTIVE_PROMPTS
+  // поменяют между раундами, трейс останется честным.
+  const promptVersions: PromptVersions = {
+    coach: ACTIVE_PROMPTS.coach,
+    reviewer: ACTIVE_PROMPTS.reviewer,
+  };
+  const coach = createHealthCoach(loadPrompt("healthCoach", promptVersions.coach));
+  const reviewer = createSafetyReviewer(loadPrompt("safetyReviewer", promptVersions.reviewer));
 
   // Контекст из markdown-файлов
   const profile = readFileSync(dataPath("profile.md"), "utf8");
-  const log = readFileSync(dataPath("log.md"), "utf8");
-  const context = `# ПРОФИЛЬ\n${profile}\n\n# ДНЕВНИК\n${log}\n\n# ЗАДАЧА\n${task}`;
+  const diary = readFileSync(dataPath("log.md"), "utf8");
+  const context = `# ПРОФИЛЬ\n${profile}\n\n# ДНЕВНИК\n${diary}\n\n# ЗАДАЧА\n${task}`;
+
+  const roundsLog = createRoundsLog();
+
+  const finish = (plan: string | null, review: Review): HealthAgentResult => {
+    const rounds = roundsLog.all();
+    return {
+      plan,
+      review,
+      rounds,
+      finalScore: finalScore(rounds),
+      improved: improved(rounds),
+      promptVersions,
+      durationMs: Date.now() - startedAt,
+    };
+  };
 
   let plan = "";
   let issues: string[] = [];
-  let lastReview: Review | null = null;
 
-  for (let round = 1; round <= 3; round++) {
+  for (let round = 1; round <= maxRounds; round++) {
     // Коуч генерирует план (со второго раунда — с учётом замечаний ревьюера)
     const coachInput = issues.length
       ? `${context}\n\n# ПРЕДЫДУЩИЙ ПЛАН\n${plan}\n\n# ЗАМЕЧАНИЯ РЕВЬЮЕРА (исправь их и верни план целиком)\n- ${issues.join("\n- ")}`
       : context;
     plan = await ask(coach, coachInput);
 
-    // Ревьюер проверяет план; невалидный JSON — один ретрай.
+    // Ревьюер проверяет план; разбор ответа и один ретрай — в validateReview.
     // Каждый run() — независимый вызов без общей памяти между агентами, поэтому
     // план передаём ревьюеру текстом внутри input.
-    const reviewInput = `# ПРОФИЛЬ\n${profile}\n\n# ДНЕВНИК\n${log}\n\n# ЗАПРОС ПОЛЬЗОВАТЕЛЯ\n${task}\n\n# ПЛАН НА ПРОВЕРКУ\n${plan}`;
-    let review = parseReview(await ask(reviewer, reviewInput));
-    if (!review) {
-      console.log("Ревьюер вернул невалидный JSON — повторный запрос");
-      const retry = `${reviewInput}\n\nПРЕДЫДУЩИЙ ОТВЕТ БЫЛ НЕВАЛИДНЫМ. Верни строго JSON по схеме.`;
-      review = parseReview(await ask(reviewer, retry));
-    }
-    if (!review) throw new Error("Ревьюер дважды вернул невалидный JSON");
-    lastReview = review;
+    const reviewInput = `# ПРОФИЛЬ\n${profile}\n\n# ДНЕВНИК\n${diary}\n\n# ЗАПРОС ПОЛЬЗОВАТЕЛЯ\n${task}\n\n# ПЛАН НА ПРОВЕРКУ\n${plan}`;
+    const review = await requestReview((input) => ask(reviewer, input), reviewInput);
+    roundsLog.record(plan, review);
 
     console.log(
       `\n[Раунд ${round}] verdict=${review.verdict} score=${review.score}` +
@@ -132,16 +178,19 @@ export async function runHealthAgent(task: string): Promise<HealthAgentResult> {
     if (review.verdict === "needs_human_professional") {
       console.log("\n⛔ Запрос требует живого специалиста (врача). План не сохранён.");
       if (review.issues.length) console.log(`Причины:\n- ${review.issues.join("\n- ")}`);
-      return { plan: null, review, rounds: round };
+      return finish(null, review);
     }
     if (review.verdict === "approve") {
       writeFileSync(dataPath("output.md"), `# ${task}\n\n_score: ${review.score}/10_\n\n${plan}\n`);
       console.log(`\n✅ План одобрен (score ${review.score}/10), сохранён в data/output.md`);
-      return { plan, review, rounds: round };
+      return finish(plan, review);
     }
     issues = review.issues; // revise → следующий раунд
   }
 
-  console.log("\n⚠️ 3 раунда пройдено, план так и не одобрен. Ничего не сохранено.");
-  return { plan, review: lastReview as Review, rounds: 3 };
+  const last = roundsLog.last();
+  if (!last) throw new Error(`maxRounds = ${maxRounds}: прогон не сделал ни одного раунда`);
+
+  console.log(`\n⚠️ ${maxRounds} раунда пройдено, план так и не одобрен. Ничего не сохранено.`);
+  return finish(last.plan, last.review);
 }
