@@ -11,19 +11,22 @@
 - `app/globals.css` — Tailwind v4 + дизайн-токены темы (см. «Дизайн-система и UI»).
 - `app/api/agent/run/route.ts` — POST endpoint `/api/agent/run`, вызывает harness.
 - `components/ui/*` — примитивы shadcn/ui (button, card, badge, alert, textarea, label, skeleton, separator).
-- `components/health/review-widgets.tsx` — презентационные виджеты ревью: `VerdictBadge`, `ScoreMeter`, `RoundsIndicator`, `RoundsHistory`, `RunMeta`, `verdictConfig`.
+- `components/health/review-widgets.tsx` — презентационные виджеты ревью: `VerdictBadge`, `ScoreMeter`, `RoundsIndicator`, `RoundsHistory`, `RunMeta`, `ToolCallsList`, `verdictConfig`.
 - `lib/utils.ts` — хелпер `cn()` (clsx + tailwind-merge) для shadcn.
 - `components.json` — конфиг shadcn CLI (base `radix`, preset `nova`, alias `@/*`).
 - `next.config.ts` — задаёт `turbopack.root`, чтобы сборщик не искал lockfile выше репозитория.
 - `postcss.config.mjs` — подключает `@tailwindcss/postcss`.
-- `src/agents/healthCoach.ts` и `src/agents/safetyReviewer.ts` — фабрики агентов: имя, модель и ничего больше. Промпт приходит параметром.
-- `src/harness/runHealthAgent.ts` — оркестратор: настройка провайдера, цикл coach/reviewer, развилка по вердикту, чтение/запись markdown.
+- `src/agents/healthCoach.ts` и `src/agents/safetyReviewer.ts` — фабрики агентов: имя, модель и ничего больше. Промпт и набор tools приходят параметрами.
+- `src/skills/*.ts` — скиллы коуча: чистая функция + её обёртка в `tool()` с Zod-схемой. По файлу на скилл, `index.ts` — два простых массива наборов.
+- `src/harness/runHealthAgent.ts` — оркестратор: настройка провайдера, цикл coach/reviewer, развилка по вердикту, выбор набора tools по фазе прогона.
 - `src/harness/validateReview.ts` — Zod-схема ревью, разбор «грязного» JSON и один ретрай.
 - `src/harness/rounds.ts` — `RoundState` и история раундов прогона.
 - `src/harness/score.ts` — итоговый score (последний approve) и флаг `improved`.
 - `src/harness/promptVersions.ts` — загрузка промптов из файлов и константа `ACTIVE_PROMPTS`.
+- `src/harness/toolCalls.ts` — извлечение имён вызванных tools из результата прогона.
 - `prompts/<agent>.<version>.md` — системные промпты агентов. Новая версия = новый файл + смена `ACTIVE_PROMPTS`, код не трогаем.
-- `data/profile.md`, `data/log.md`, `data/output.md` — локальный профиль, дневник и последний одобренный план.
+- `data/profile.md`, `data/log.md`, `data/recipes.md` — локальный контекст: профиль, дневник, любимые рецепты. Читаются только скиллами.
+- `data/output.md`, `data/shopping.md` — результаты работы скиллов: последний одобренный план и список покупок к нему.
 - `AGENTS.md` генерирует сам Next.js при каждом `npm run dev`, он в `.gitignore`; правки туда вносить бессмысленно.
 - Тестовой директории сейчас нет; статические ассеты тоже не используются.
 
@@ -52,14 +55,25 @@ UI строится на **Tailwind CSS v4 + shadcn/ui**. Стилизуйте �
 - **Токены:** объявлены в `:root` внутри `app/globals.css` и проброшены в Tailwind через `@theme inline`. Базовая палитра — cyan (`--primary #0e7490`) на светлом cyan-фоне (`--background #f5fbfc`), текст `--foreground #123c49`. Значения подобраны под контраст WCAG AA. Меняйте цвета только здесь, не в компонентах.
 - **Dark mode:** вариант `dark` объявлен через `@custom-variant`, но переопределений токенов нет. Это осознанно: утилиты `dark:*` в примитивах shadcn компилируются и остаются мёртвыми, вместо того чтобы срабатывать от системной темы и ломать палитру.
 - **Семантика статусов:** цвет вердикта передаётся цветом + иконкой + текстом (правило `color-not-only`). Маппинг живёт в `verdictConfig` (`components/health/review-widgets.tsx`): `approve` → emerald, `revise` → amber, `needs_human_professional` → red. Для статусов используются встроенные шкалы Tailwind (emerald/amber/red), а не кастомные токены.
-- **Информативность результата:** `ScoreMeter` (индикатор 0–10 с цветом по порогу и `role="meter"`), `RoundsIndicator` (раунды ревью), список замечаний, `RunMeta` (длительность прогона и версии промптов), `RoundsHistory` (свёрнутая история раундов), кнопка «Копировать» плана. Loading использует `Skeleton`; empty-state — нумерованные шаги ревью.
+- **Информативность результата:** `ScoreMeter` (индикатор 0–10 с цветом по порогу и `role="meter"`), `RoundsIndicator` (раунды ревью), `ReviewIssues` (замечания ревьюера, свёрнутые по умолчанию — это трейс проверки, а не часть ответа; разворачиваются сами только при `needs_human_professional`), `ToolCallsList` («Что сделал агент»), `RunMeta` (длительность прогона и версии промптов), `RoundsHistory` (свёрнутая история раундов), кнопка «Копировать» плана. Loading использует `Skeleton`; empty-state — нумерованные шаги ревью.
 - **A11y:** skip-link в layout, `aria-live` на статусе, видимые focus-ring, touch-friendly CTA (`size="lg"` + `min-h-11`), уважается `prefers-reduced-motion`. Пустая задача даёт inline-ошибку рядом с полем, а не отключённую кнопку.
 
 При правках UI придерживайтесь чек-листа: контраст ≥4.5:1, один primary-CTA на экран, transitions 150–300 мс, проверка на 375/768/1024/1440 px без горизонтального скролла.
 
+## Скиллы и tools
+
+Контекст в промпт коуча не вклеивается: профиль, дневник и рецепты агент достаёт сам, вызывая инструменты (function calling через OpenAI Agents SDK).
+
+- Один скилл — один файл в `src/skills/`: чистая функция (её можно звать из харнесса мимо модели) и её обёртка в `tool()` с Zod-схемой параметров.
+- Описание tool'а — это интерфейс для модели, а не комментарий. Пишите в нём не только «что отдаёт», но и «когда вызывать» и «чего там нет», иначе модель дёргает инструмент не к месту или не дёргает вовсе.
+- Наборы инструментов — два простых массива в `src/skills/index.ts`: `PLANNING_TOOLS` и `SAVING_TOOLS`. Реестра и плагинной системы нет и не нужно.
+- **Tools только у коуча.** У Safety Reviewer их нет и быть не должно: вердикт обязан быть функцией входа, а сторона, одобряющая запись, сама на диск не пишет. Подробнее — в комментарии `src/agents/safetyReviewer.ts`.
+- **`savePlan` гейтит харнесс, а не промпт.** На раундах генерации коуч собирается без `savePlanTool` — вызвать то, чего не показали, модель не может. После approve харнесс поднимает коуча второй конфигурацией (`SAVING_TOOLS`, `toolChoice: "required"`) и делает один короткий вызов. Инвариант «на диск попадает только одобренный план» держится кодом. Подробнее — в комментарии `src/skills/plans.ts`.
+- Имена вызванных инструментов собираются из результата прогона (`src/harness/toolCalls.ts`), уходят в `HealthAgentResult.toolCalls` и показываются в UI блоком «Что сделал агент». Скиллы о том, что их считают, не знают.
+
 ## Тестирование
 
-Автоматические тесты пока не настроены. Перед сдачей изменений минимум запускайте `npm run build` (он же прогоняет TypeScript). Для изменений UI вручную проверьте `npm run dev`: idle, running (skeleton + спиннер на кнопке), result (score-meter, раунды, замечания, «Копировать»), warning при `needs_human_professional`, а также error (пустая задача / отсутствие ключа). Для изменений harness проверьте, что одобренный план записывается в `data/output.md`, а результат содержит `rounds`, `finalScore`, `promptVersions` и `durationMs`.
+Автоматические тесты пока не настроены. Перед сдачей изменений минимум запускайте `npm run build` (он же прогоняет TypeScript). Для изменений UI вручную проверьте `npm run dev`: idle, running (skeleton + спиннер на кнопке), result (score-meter, раунды, замечания, «Копировать»), warning при `needs_human_professional`, а также error (пустая задача / отсутствие ключа). Для изменений harness проверьте, что одобренный план записывается в `data/output.md`, а результат содержит `rounds`, `toolCalls`, `finalScore`, `promptVersions` и `durationMs`. Для изменений скиллов — что в `toolCalls` попали ожидаемые имена и что побочные файлы (`data/shopping.md`) обновились.
 При написании кода агентом не пиши тесты и не используй TDD.
 
 ## Коммиты и pull request

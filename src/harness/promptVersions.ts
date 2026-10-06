@@ -9,7 +9,7 @@ import { join } from "node:path";
 export type PromptName = "healthCoach" | "safetyReviewer";
 
 /** Какие версии промптов идут в прогон. Новая версия включается правкой этой константы. */
-export const ACTIVE_PROMPTS = { coach: "v1", reviewer: "v1" };
+export const ACTIVE_PROMPTS = { coach: "v2", reviewer: "v2" };
 
 /** Версии, которыми фактически отработал прогон: уходят в результат как часть трейса. */
 export type PromptVersions = { coach: string; reviewer: string };

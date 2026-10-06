@@ -1,4 +1,17 @@
-import { CheckCircle2, PencilLine, Stethoscope, TrendingUp, type LucideIcon } from "lucide-react";
+import {
+  ChefHat,
+  CheckCircle2,
+  Dumbbell,
+  NotebookPen,
+  PencilLine,
+  Save,
+  ShoppingCart,
+  Stethoscope,
+  TrendingUp,
+  UserRound,
+  Wrench,
+  type LucideIcon,
+} from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
@@ -176,6 +189,94 @@ export function RoundsHistory({
             </li>
           );
         })}
+      </ul>
+    </details>
+  );
+}
+
+/**
+ * Подписи и иконки вызванных скиллов. Имя tool'а приходит из харнесса как есть,
+ * поэтому карта неполная по определению: новый скилл должен показаться в списке
+ * сразу, ещё до того, как ему подберут иконку, — отсюда фолбэк в toolPresentation.
+ */
+const toolConfig: Record<string, { label: string; icon: LucideIcon }> = {
+  getProfile: { label: "Прочитал профиль", icon: UserRound },
+  getRecentLog: { label: "Поднял записи дневника", icon: NotebookPen },
+  listFavoriteRecipes: { label: "Посмотрел любимые рецепты", icon: ChefHat },
+  suggestWorkoutTemplate: { label: "Взял шаблон тренировки", icon: Dumbbell },
+  generateShoppingList: { label: "Собрал список покупок", icon: ShoppingCart },
+  savePlan: { label: "Сохранил план", icon: Save },
+};
+
+function toolPresentation(name: string) {
+  return toolConfig[name] ?? { label: name, icon: Wrench };
+}
+
+/**
+ * Что агент сделал своими руками, в порядке вызова. Это не украшение: с tools
+ * ответ перестаёт быть функцией одного промпта, и без этого списка непонятно,
+ * на какие данные агент опирался и что он записал на диск.
+ */
+export function ToolCallsList({ toolCalls, className }: { toolCalls: string[]; className?: string }) {
+  if (toolCalls.length === 0) {
+    return (
+      <p className={cn("text-muted-foreground text-sm", className)}>
+        Агент не обращался к инструментам — план составлен без дополнительных данных.
+      </p>
+    );
+  }
+
+  return (
+    <ol className={cn("space-y-2", className)}>
+      {toolCalls.map((name, index) => {
+        const { label, icon: Icon } = toolPresentation(name);
+        return (
+          <li key={`${name}-${index}`} className="flex items-start gap-2.5 text-sm">
+            <span className="text-muted-foreground mt-0.5 w-4 shrink-0 text-right tabular-nums">
+              {index + 1}
+            </span>
+            <Icon className="text-primary mt-0.5 size-4 shrink-0" aria-hidden="true" />
+            <span>
+              {label} <code className="text-muted-foreground text-xs">{name}</code>
+            </span>
+          </li>
+        );
+      })}
+    </ol>
+  );
+}
+
+/**
+ * Замечания ревьюера, по умолчанию свёрнутые: это трейс проверки, а не часть
+ * ответа пользователю. Разворачивать их всегда — плохая идея ещё и потому, что
+ * ревьюер описывает нарушения ограничений профиля, и в его формулировках само
+ * ограничение проступает даже тогда, когда план его аккуратно обходит.
+ *
+ * Исключение — needs_human_professional: плана нет, и причины отказа остаются
+ * единственным содержательным текстом на экране, прятать их незачем.
+ */
+export function ReviewIssues({
+  issues,
+  defaultOpen = false,
+  className,
+}: {
+  issues: string[];
+  defaultOpen?: boolean;
+  className?: string;
+}) {
+  if (issues.length === 0) {
+    return <p className={cn("text-muted-foreground text-sm", className)}>Замечаний нет</p>;
+  }
+
+  return (
+    <details open={defaultOpen} className={cn("group", className)}>
+      <summary className="text-muted-foreground hover:text-foreground focus-visible:ring-ring/50 cursor-pointer rounded-md text-sm transition-colors focus-visible:ring-3 focus-visible:outline-none">
+        Замечания ревьюера ({issues.length})
+      </summary>
+      <ul className="text-muted-foreground mt-3 max-w-[68ch] list-disc space-y-1.5 pl-5 text-sm">
+        {issues.map((issue, index) => (
+          <li key={index}>{issue}</li>
+        ))}
       </ul>
     </details>
   );

@@ -13,8 +13,10 @@ import { Textarea } from "@/components/ui/textarea";
 import {
   RoundsHistory,
   RoundsIndicator,
+  ReviewIssues,
   RunMeta,
   ScoreMeter,
+  ToolCallsList,
   VerdictBadge,
   verdictConfig,
 } from "@/components/health/review-widgets";
@@ -27,9 +29,10 @@ type State =
   | { status: "error"; message: string };
 
 const REVIEW_STEPS = [
-  "Коуч читает профиль и дневник и пишет план.",
-  "Safety Reviewer проверяет его на безопасность, реалистичность и соответствие профилю.",
+  "Коуч сам решает, какие данные ему нужны: профиль, дневник, рецепты, шаблоны тренировок.",
+  "Safety Reviewer проверяет план на безопасность, реалистичность и соответствие профилю.",
   "Если есть замечания, план переписывается — до трёх раундов.",
+  "Одобренный план агент сохраняет в файл: до approve этот инструмент ему недоступен.",
 ];
 
 export default function Page() {
@@ -185,7 +188,7 @@ function RunningState() {
 }
 
 function Result({ result }: { result: HealthAgentResult }) {
-  const { plan, review, rounds, improved, promptVersions, durationMs } = result;
+  const { plan, review, rounds, toolCalls, improved, promptVersions, durationMs } = result;
   const needsProfessional = review.verdict === "needs_human_professional";
 
   return (
@@ -218,18 +221,7 @@ function Result({ result }: { result: HealthAgentResult }) {
 
           <Separator />
 
-          {review.issues.length > 0 ? (
-            <div className="space-y-2">
-              <h3 className="text-sm font-semibold">Замечания ревьюера</h3>
-              <ul className="text-muted-foreground max-w-[68ch] list-disc space-y-1.5 pl-5 text-sm">
-                {review.issues.map((issue, index) => (
-                  <li key={index}>{issue}</li>
-                ))}
-              </ul>
-            </div>
-          ) : (
-            <p className="text-muted-foreground text-sm">Замечаний нет</p>
-          )}
+          <ReviewIssues issues={review.issues} defaultOpen={needsProfessional} />
 
           <Separator />
 
@@ -237,6 +229,15 @@ function Result({ result }: { result: HealthAgentResult }) {
             <RunMeta durationMs={durationMs} promptVersions={promptVersions} />
             <RoundsHistory rounds={rounds} improved={improved} />
           </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Что сделал агент</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <ToolCallsList toolCalls={toolCalls} />
         </CardContent>
       </Card>
 

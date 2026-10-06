@@ -1,6 +1,4 @@
 import "dotenv/config";
-import { readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
 import OpenAI from "openai";
 import {
   Agent,
@@ -12,9 +10,13 @@ import {
 
 import { createHealthCoach } from "../agents/healthCoach";
 import { createSafetyReviewer } from "../agents/safetyReviewer";
+import { PLANNING_TOOLS, SAVING_TOOLS } from "../skills";
+import { getProfile } from "../skills/profile";
+import { getRecentLog } from "../skills/logs";
 import { ACTIVE_PROMPTS, loadPrompt, type PromptVersions } from "./promptVersions";
 import { createRoundsLog, type RoundState } from "./rounds";
 import { finalScore, improved } from "./score";
+import { collectToolCalls } from "./toolCalls";
 import { requestReview, type Review } from "./validateReview";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -23,7 +25,12 @@ import { requestReview, type Review } from "./validateReview";
 // Собирает прогон из модулей харнесса: берёт версии промптов, строит агентов,
 // крутит цикл коуч ↔ ревьюер и складывает трейс. Вся проверка ответа ревьюера
 // живёт в validateReview, история раундов — в rounds, выводы по оценкам — в
-// score. Здесь остаются только связывание, развилка по вердикту и запись файла.
+// score, трейс вызовов инструментов — в toolCalls. Здесь остаются только
+// связывание, развилка по вердикту и выбор того, какие tools открыты на какой
+// фазе прогона.
+//
+// Контекст коуча в промпт больше не вклеивается: профиль и дневник он достаёт
+// сам через скиллы (src/skills/), когда решит, что они ему нужны.
 // ─────────────────────────────────────────────────────────────────────────────
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -67,8 +74,9 @@ function ensureProvider() {
   // setOpenAIAPI("chat_completions") — переключает протокол общения с моделью.
   // По умолчанию SDK использует OpenAI Responses API (/responses) — его нет ни у
   // OpenRouter, ни у DeepSeek. Этот вызов заставляет SDK собирать запросы в
-  // формате Chat Completions (/chat/completions): messages[], role/content —
-  // то, что понимает почти любой OpenAI-совместимый провайдер.
+  // формате Chat Completions (/chat/completions): messages[], role/content,
+  // tools[] с JSON-схемами параметров — то, что понимает почти любой
+  // OpenAI-совместимый провайдер.
   setOpenAIAPI("chat_completions");
 
   // setTracingDisabled(true) — выключает встроенный экспорт трейсов. По умолчанию
@@ -79,25 +87,31 @@ function ensureProvider() {
   providerReady = true;
 }
 
+/** Ответ агента: финальный текст и имена инструментов, которые он вызвал по пути. */
+type AgentReply = { text: string; toolCalls: string[] };
+
 // run(agent, input) — запускает агентный цикл: собирает запрос (system из
 // instructions + наш input как сообщение user), шлёт его через клиент, получает
-// ответ. Если бы у агента были tools, цикл крутился бы дальше — вызов
-// инструмента, результат, повторный запрос к модели — пока модель не выдаст
-// финальный текст (не больше maxTurns, по умолчанию 10). У нас инструментов
-// нет, поэтому цикл всегда ровно один оборот.
-// Возвращает RunResult; нужное поле — finalOutput: текст последнего ответа
-// модели (строка, если у агента не задан outputType). Здесь же лежат history,
-// newItems и usage — они нам не нужны.
-async function ask(agent: Agent, input: string): Promise<string> {
+// ответ. Если модель вместо текста просит вызвать инструмент, SDK сам исполняет
+// его execute, кладёт результат в историю и идёт к модели снова — и так по
+// кругу, пока не придёт финальный текст (не больше maxTurns, по умолчанию 10).
+// Именно поэтому у коуча с tools один run() может стоить несколько обращений к
+// модели, а у ревьюера без tools — всегда ровно одно.
+// Возвращает RunResult; нужные поля — finalOutput (текст последнего ответа) и
+// newItems (всё, что произошло за прогон: сообщения, вызовы инструментов и их
+// результаты) — из них собирается трейс вызовов.
+async function ask(agent: Agent, input: string): Promise<AgentReply> {
   const result = await run(agent, input);
-  return String(result.finalOutput ?? "");
+  return {
+    text: String(result.finalOutput ?? ""),
+    toolCalls: collectToolCalls(result.newItems),
+  };
 }
 
-// Контекст и результат лежат в data/, пути считаем от корня проекта —
-// и dev-сервер, и production-сборка запускаются оттуда.
-const dataPath = (file: string) => join(process.cwd(), "data", file);
-
 const DEFAULT_MAX_ROUNDS = 3;
+
+/** Сколько последних записей дневника видит ревьюер. Коуч решает это сам, через getRecentLog. */
+const REVIEWER_LOG_DAYS = 7;
 
 export type HealthAgentResult = {
   /** Финальный план. null — если вердикт needs_human_professional: план не отдаём. */
@@ -106,13 +120,15 @@ export type HealthAgentResult = {
   review: Review;
   /** Трейс прогона: каждый раунд с планом и его ревью. */
   rounds: RoundState[];
+  /** Имена инструментов, вызванных коучем за весь прогон, по порядку. */
+  toolCalls: string[];
   /** Score последнего одобренного раунда; null, если approve не случился. */
   finalScore: number | null;
   /** Вырос ли score на последней ревизии относительно предыдущего раунда. */
   improved: boolean;
   /** Версии промптов, которыми фактически отработал прогон. */
   promptVersions: PromptVersions;
-  /** Длительность прогона целиком, включая чтение файлов и запись output.md. */
+  /** Длительность прогона целиком, включая вызовы инструментов. */
   durationMs: number;
 };
 
@@ -129,15 +145,20 @@ export async function runHealthAgent(
     coach: ACTIVE_PROMPTS.coach,
     reviewer: ACTIVE_PROMPTS.reviewer,
   };
-  const coach = createHealthCoach(loadPrompt("healthCoach", promptVersions.coach));
+  const coachPrompt = loadPrompt("healthCoach", promptVersions.coach);
+
+  // Коуч фазы генерации: инструменты чтения и подготовки, но без savePlan —
+  // одобренного плана на этой фазе ещё не существует.
+  const coach = createHealthCoach(coachPrompt, PLANNING_TOOLS);
   const reviewer = createSafetyReviewer(loadPrompt("safetyReviewer", promptVersions.reviewer));
 
-  // Контекст из markdown-файлов
-  const profile = readFileSync(dataPath("profile.md"), "utf8");
-  const diary = readFileSync(dataPath("log.md"), "utf8");
-  const context = `# ПРОФИЛЬ\n${profile}\n\n# ДНЕВНИК\n${diary}\n\n# ЗАДАЧА\n${task}`;
+  // Ревьюеру контекст по-прежнему приходит текстом: у него нет и не должно быть
+  // инструментов (см. agents/safetyReviewer.ts). Скиллы здесь зовутся как
+  // обычные функции — модель в этом не участвует, лишних вызовов не возникает.
+  const reviewerContext = `# ПРОФИЛЬ\n${getProfile()}\n\n# ДНЕВНИК\n${getRecentLog(REVIEWER_LOG_DAYS)}`;
 
   const roundsLog = createRoundsLog();
+  const toolCalls: string[] = [];
 
   const finish = (plan: string | null, review: Review): HealthAgentResult => {
     const rounds = roundsLog.all();
@@ -145,6 +166,7 @@ export async function runHealthAgent(
       plan,
       review,
       rounds,
+      toolCalls,
       finalScore: finalScore(rounds),
       improved: improved(rounds),
       promptVersions,
@@ -156,21 +178,29 @@ export async function runHealthAgent(
   let issues: string[] = [];
 
   for (let round = 1; round <= maxRounds; round++) {
-    // Коуч генерирует план (со второго раунда — с учётом замечаний ревьюера)
+    // Коуч получает только задачу: профиль, дневник и рецепты он добирает сам,
+    // вызывая скиллы. Со второго раунда к задаче добавляются прошлый план и
+    // замечания ревьюера.
     const coachInput = issues.length
-      ? `${context}\n\n# ПРЕДЫДУЩИЙ ПЛАН\n${plan}\n\n# ЗАМЕЧАНИЯ РЕВЬЮЕРА (исправь их и верни план целиком)\n- ${issues.join("\n- ")}`
-      : context;
-    plan = await ask(coach, coachInput);
+      ? `# ЗАДАЧА\n${task}\n\n# ПРЕДЫДУЩИЙ ПЛАН\n${plan}\n\n# ЗАМЕЧАНИЯ РЕВЬЮЕРА (исправь их и верни план целиком)\n- ${issues.join("\n- ")}`
+      : `# ЗАДАЧА\n${task}`;
+    const coachReply = await ask(coach, coachInput);
+    plan = coachReply.text;
+    toolCalls.push(...coachReply.toolCalls);
 
     // Ревьюер проверяет план; разбор ответа и один ретрай — в validateReview.
     // Каждый run() — независимый вызов без общей памяти между агентами, поэтому
     // план передаём ревьюеру текстом внутри input.
-    const reviewInput = `# ПРОФИЛЬ\n${profile}\n\n# ДНЕВНИК\n${diary}\n\n# ЗАПРОС ПОЛЬЗОВАТЕЛЯ\n${task}\n\n# ПЛАН НА ПРОВЕРКУ\n${plan}`;
-    const review = await requestReview((input) => ask(reviewer, input), reviewInput);
+    const reviewInput = `${reviewerContext}\n\n# ЗАПРОС ПОЛЬЗОВАТЕЛЯ\n${task}\n\n# ПЛАН НА ПРОВЕРКУ\n${plan}`;
+    const review = await requestReview(
+      async (input) => (await ask(reviewer, input)).text,
+      reviewInput,
+    );
     roundsLog.record(plan, review);
 
     console.log(
       `\n[Раунд ${round}] verdict=${review.verdict} score=${review.score}` +
+        `\ntools: ${coachReply.toolCalls.join(", ") || "нет"}` +
         (review.issues.length ? `\nissues:\n- ${review.issues.join("\n- ")}` : "\nissues: нет"),
     );
 
@@ -181,8 +211,7 @@ export async function runHealthAgent(
       return finish(null, review);
     }
     if (review.verdict === "approve") {
-      writeFileSync(dataPath("output.md"), `# ${task}\n\n_score: ${review.score}/10_\n\n${plan}\n`);
-      console.log(`\n✅ План одобрен (score ${review.score}/10), сохранён в data/output.md`);
+      toolCalls.push(...(await savePhase(coachPrompt, task, plan, review.score)));
       return finish(plan, review);
     }
     issues = review.issues; // revise → следующий раунд
@@ -193,4 +222,49 @@ export async function runHealthAgent(
 
   console.log(`\n⚠️ ${maxRounds} раунда пройдено, план так и не одобрен. Ничего не сохранено.`);
   return finish(last.plan, last.review);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ФАЗА СОХРАНЕНИЯ
+//
+// Отдельный агент на той же модели и том же промпте, но с другим набором tools:
+// только savePlan, и toolChoice="required", потому что от него ждут не текста, а
+// одного вызова. Это и есть гейт: право записи выдаёт харнесс сменой
+// конфигурации агента, а не инструкция в промпте (почему именно так —
+// подробно в skills/plans.ts).
+//
+// Текст плана передаётся дословно между маркерами: модель здесь ничего не
+// сочиняет, её работа — донести готовый план до инструмента.
+//
+// Ошибка этой фазы не роняет прогон: план уже одобрен и уйдёт пользователю в
+// ответе API. Не записанный файл — потеря, но меньшая, чем 500 вместо готового
+// плана.
+// ─────────────────────────────────────────────────────────────────────────────
+async function savePhase(
+  coachPrompt: string,
+  task: string,
+  plan: string,
+  score: number,
+): Promise<string[]> {
+  const document = `# ${task}\n\n_score: ${score}/10_\n\n${plan}`;
+  const input =
+    `Safety Reviewer одобрил план (score ${score}/10). Сохрани его.\n\n` +
+    `Вызови savePlan и передай в параметре markdown ровно текст между маркерами, ` +
+    `дословно и целиком, ничего не добавляя и не сокращая.\n\n` +
+    `<<<PLAN\n${document}\nPLAN>>>`;
+
+  const saver = createHealthCoach(coachPrompt, SAVING_TOOLS, "required");
+
+  try {
+    const reply = await ask(saver, input);
+    if (reply.toolCalls.includes("savePlan")) {
+      console.log(`\n✅ План одобрен (score ${score}/10), сохранён в data/output.md`);
+    } else {
+      console.log("\n⚠️ План одобрен, но агент не вызвал savePlan — файл не обновлён.");
+    }
+    return reply.toolCalls;
+  } catch (err) {
+    console.log(`\n⚠️ Фаза сохранения не удалась: ${err instanceof Error ? err.message : err}`);
+    return [];
+  }
 }
