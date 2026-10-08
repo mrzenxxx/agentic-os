@@ -2,7 +2,7 @@ import { Agent } from "@openai/agents";
 
 // Ревью по чек-листу с готовым JSON-ответом проще генерации плана, поэтому
 // ревьюер сидит на flash (примерно в 20 раз дешевле pro).
-const REVIEWER_MODEL = process.env.OPENROUTER_REVIEWER_MODEL ?? "deepseek/deepseek-v4-flash-0731";
+export const REVIEWER_MODEL = process.env.OPENROUTER_REVIEWER_MODEL ?? "deepseek/deepseek-v4-flash-0731";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // У РЕВЬЮЕРА НЕТ TOOLS — И НЕ ДОЛЖНО ПОЯВИТЬСЯ

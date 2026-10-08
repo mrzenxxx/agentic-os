@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start"
+    "start": "next start",
+    "replay": "tsx scripts/replay.ts",
+    "eval": "tsx scripts/eval.ts"
   },
   "keywords": [],
   "author": "",

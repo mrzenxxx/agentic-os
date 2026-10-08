@@ -8,8 +8,8 @@ import {
   setTracingDisabled,
 } from "@openai/agents";
 
-import { createHealthCoach } from "../agents/healthCoach";
-import { createSafetyReviewer } from "../agents/safetyReviewer";
+import { COACH_MODEL, createHealthCoach } from "../agents/healthCoach";
+import { createSafetyReviewer, REVIEWER_MODEL } from "../agents/safetyReviewer";
 import { PLANNING_TOOLS, SAVING_TOOLS } from "../skills";
 import { getProfile } from "../skills/profile";
 import { getRecentLog } from "../skills/logs";
@@ -17,6 +17,7 @@ import { ACTIVE_PROMPTS, loadPrompt, type PromptVersions } from "./promptVersion
 import { createRoundsLog, type RoundState } from "./rounds";
 import { finalScore, improved } from "./score";
 import { collectToolCalls } from "./toolCalls";
+import { traceRun } from "./traceRun";
 import { requestReview, type Review } from "./validateReview";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -149,7 +150,7 @@ export async function runHealthAgent(
 
   // Коуч фазы генерации: инструменты чтения и подготовки, но без savePlan —
   // одобренного плана на этой фазе ещё не существует.
-  const coach = createHealthCoach(coachPrompt, PLANNING_TOOLS);
+  const coach = createHealthCoach(coachPrompt, { tools: PLANNING_TOOLS });
   const reviewer = createSafetyReviewer(loadPrompt("safetyReviewer", promptVersions.reviewer));
 
   // Ревьюеру контекст по-прежнему приходит текстом: у него нет и не должно быть
@@ -160,9 +161,11 @@ export async function runHealthAgent(
   const roundsLog = createRoundsLog();
   const toolCalls: string[] = [];
 
+  // Единственная точка выхода из прогона: через неё проходят все три развилки по
+  // вердикту, поэтому трейс пишется здесь — и ни один исход не остаётся без файла.
   const finish = (plan: string | null, review: Review): HealthAgentResult => {
     const rounds = roundsLog.all();
-    return {
+    const result: HealthAgentResult = {
       plan,
       review,
       rounds,
@@ -172,6 +175,20 @@ export async function runHealthAgent(
       promptVersions,
       durationMs: Date.now() - startedAt,
     };
+
+    const tracePath = traceRun({
+      task,
+      promptVersions,
+      model: { coach: COACH_MODEL, reviewer: REVIEWER_MODEL },
+      rounds,
+      toolCalls,
+      finalScore: result.finalScore,
+      verdict: review.verdict,
+      durationMs: result.durationMs,
+    });
+    if (tracePath) console.log(`\nТрейс: ${tracePath}`);
+
+    return result;
   };
 
   let plan = "";
@@ -234,7 +251,9 @@ export async function runHealthAgent(
 // подробно в skills/plans.ts).
 //
 // Текст плана передаётся дословно между маркерами: модель здесь ничего не
-// сочиняет, её работа — донести готовый план до инструмента.
+// сочиняет, её работа — донести готовый план до инструмента. Прогон обрывается
+// на первом же вызове (stopOnFirstTool): записывать файл второй раз незачем,
+// и возвращаться к модели после записи тоже.
 //
 // Ошибка этой фазы не роняет прогон: план уже одобрен и уйдёт пользователю в
 // ответе API. Не записанный файл — потеря, но меньшая, чем 500 вместо готового
@@ -253,7 +272,11 @@ async function savePhase(
     `дословно и целиком, ничего не добавляя и не сокращая.\n\n` +
     `<<<PLAN\n${document}\nPLAN>>>`;
 
-  const saver = createHealthCoach(coachPrompt, SAVING_TOOLS, "required");
+  const saver = createHealthCoach(coachPrompt, {
+    tools: SAVING_TOOLS,
+    toolChoice: "required",
+    stopOnFirstTool: true,
+  });
 
   try {
     const reply = await ask(saver, input);

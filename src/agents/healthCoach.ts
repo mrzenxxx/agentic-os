@@ -3,7 +3,7 @@ import { Agent, type Tool } from "@openai/agents";
 // Модель в формате OpenRouter: "<вендор>/<модель>". Генерация плана — задача
 // сложнее ревью по чек-листу, поэтому коуч сидит на pro.
 // Список актуальных id: https://openrouter.ai/api/v1/models
-const COACH_MODEL = process.env.OPENROUTER_COACH_MODEL ?? "deepseek/deepseek-v4-pro-0813";
+export const COACH_MODEL = process.env.OPENROUTER_COACH_MODEL ?? "deepseek/deepseek-v4-pro-0813";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // new Agent({...}) — это не сетевой вызов и не процесс, а конфигурация одного
@@ -21,21 +21,34 @@ const COACH_MODEL = process.env.OPENROUTER_COACH_MODEL ?? "deepseek/deepseek-v4-
 // (см. promptVersions.ts и skills/index.ts). Этот модуль отвечает только за то,
 // кем агент является и на какой модели работает.
 //
-// toolChoice="required" нужен фазе сохранения: там от агента ждут не текста, а
-// ровно одного вызова инструмента. Бесконечного цикла из этого не выходит —
-// resetToolChoice в SDK по умолчанию true и возвращает выбор в "auto" сразу
-// после первого вызова.
+// Фазе сохранения нужны оба переключателя разом: от агента там ждут не текста, а
+// ровно одного вызова инструмента.
+//   toolChoice="required"            — модель обязана вызвать инструмент, а не ответить текстом
+//   stopOnFirstTool=true             — прогон заканчивается на первом же вызове
+// Одного toolChoice мало: resetToolChoice в SDK обещает вернуть выбор в "auto"
+// после первого вызова, но на chat_completions-провайдере это срабатывает не
+// всегда — в одном из прогонов savePlan вызвался три раза подряд. Остановка по
+// первому вызову делает повтор невозможным и заодно экономит лишний оборот к
+// модели: возвращаться к ней после записи файла незачем.
 // ─────────────────────────────────────────────────────────────────────────────
-export function createHealthCoach(
-  instructions: string,
-  tools: Tool[] = [],
-  toolChoice: "auto" | "required" = "auto",
-): Agent {
+export type CoachOptions = {
+  /** Инструменты, которые модель видит на этой фазе прогона. */
+  tools?: Tool[];
+  /** "required" — модель обязана вызвать инструмент вместо текстового ответа. */
+  toolChoice?: "auto" | "required";
+  /** Завершить прогон сразу после первого вызова инструмента, не возвращаясь к модели. */
+  stopOnFirstTool?: boolean;
+};
+
+export function createHealthCoach(instructions: string, options: CoachOptions = {}): Agent {
+  const { tools = [], toolChoice = "auto", stopOnFirstTool = false } = options;
+
   return new Agent({
     name: "Health Coach",
     instructions,
     model: COACH_MODEL,
     tools,
     modelSettings: { toolChoice },
+    toolUseBehavior: stopOnFirstTool ? "stop_on_first_tool" : "run_llm_again",
   });
 }
