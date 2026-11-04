@@ -11,14 +11,14 @@ import type { RunItem } from "@openai/agents";
 
 /**
  * Имена инструментов, вызванных за один прогон, в порядке вызова.
- * Повторы сохраняются: два обращения к getRecentLog — это два разных факта.
+ * Повторы сохраняются: два обращения к read_recent_logs — это два разных факта.
  */
 export function collectToolCalls(items: RunItem[]): string[] {
   const names: string[] = [];
 
   for (const item of items) {
     // tool_call_item покрывает все виды вызовов; имя есть только у function_call,
-    // а им наши скиллы и являются.
+    // а ими являются и локальные tools, и MCP tools после конвертации SDK.
     if (item.type !== "tool_call_item") continue;
     if (item.rawItem.type !== "function_call") continue;
     names.push(item.rawItem.name);

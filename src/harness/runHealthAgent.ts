@@ -6,13 +6,13 @@ import {
   setDefaultOpenAIClient,
   setOpenAIAPI,
   setTracingDisabled,
+  type MCPServerStdio,
 } from "@openai/agents";
 
 import { COACH_MODEL, createHealthCoach } from "../agents/healthCoach";
 import { createSafetyReviewer, REVIEWER_MODEL } from "../agents/safetyReviewer";
-import { PLANNING_TOOLS, SAVING_TOOLS } from "../skills";
-import { getProfile } from "../skills/profile";
-import { getRecentLog } from "../skills/logs";
+import { PLANNING_TOOLS } from "../skills";
+import { createHealthMcpServer, readHealthResource, SAVING_AGENT_NAME } from "../mcp/healthMcp";
 import { ACTIVE_PROMPTS, loadPrompt, type PromptVersions } from "./promptVersions";
 import { createRoundsLog, type RoundState } from "./rounds";
 import { finalScore, improved } from "./score";
@@ -31,7 +31,7 @@ import { requestReview, type Review } from "./validateReview";
 // фазе прогона.
 //
 // Контекст коуча в промпт больше не вклеивается: профиль и дневник он достаёт
-// сам через скиллы (src/skills/), когда решит, что они ему нужны.
+// сам через MCP tools, когда решит, что они ему нужны.
 // ─────────────────────────────────────────────────────────────────────────────
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -111,9 +111,6 @@ async function ask(agent: Agent, input: string): Promise<AgentReply> {
 
 const DEFAULT_MAX_ROUNDS = 3;
 
-/** Сколько последних записей дневника видит ревьюер. Коуч решает это сам, через getRecentLog. */
-const REVIEWER_LOG_DAYS = 7;
-
 export type HealthAgentResult = {
   /** Финальный план. null — если вердикт needs_human_professional: план не отдаём. */
   plan: string | null;
@@ -140,6 +137,28 @@ export async function runHealthAgent(
   const startedAt = Date.now();
   ensureProvider();
 
+  // Соединение не глобальное: отдельный stdio-процесс живёт ровно один прогон.
+  // finally срабатывает и при ошибке connect, модели или разбора ревью.
+  const mcp = createHealthMcpServer();
+  try {
+    await mcp.connect();
+    return await runWithMcp(task, maxRounds, mcp, startedAt);
+  } finally {
+    try {
+      await mcp.close();
+    } catch (err) {
+      console.warn("Не удалось закрыть MCP:", err instanceof Error ? err.message : err);
+    }
+  }
+}
+
+async function runWithMcp(
+  task: string,
+  maxRounds: number,
+  mcp: MCPServerStdio,
+  startedAt: number,
+): Promise<HealthAgentResult> {
+
   // Версии промптов фиксируем один раз на прогон: даже если ACTIVE_PROMPTS
   // поменяют между раундами, трейс останется честным.
   const promptVersions: PromptVersions = {
@@ -148,15 +167,17 @@ export async function runHealthAgent(
   };
   const coachPrompt = loadPrompt("healthCoach", promptVersions.coach);
 
-  // Коуч фазы генерации: инструменты чтения и подготовки, но без savePlan —
+  // Коуч фазы генерации: MCP + локальные инструменты, но без save_health_plan —
   // одобренного плана на этой фазе ещё не существует.
-  const coach = createHealthCoach(coachPrompt, { tools: PLANNING_TOOLS });
+  const coach = createHealthCoach(coachPrompt, { tools: PLANNING_TOOLS, mcpServers: [mcp] });
   const reviewer = createSafetyReviewer(loadPrompt("safetyReviewer", promptVersions.reviewer));
 
   // Ревьюеру контекст по-прежнему приходит текстом: у него нет и не должно быть
-  // инструментов (см. agents/safetyReviewer.ts). Скиллы здесь зовутся как
-  // обычные функции — модель в этом не участвует, лишних вызовов не возникает.
-  const reviewerContext = `# ПРОФИЛЬ\n${getProfile()}\n\n# ДНЕВНИК\n${getRecentLog(REVIEWER_LOG_DAYS)}`;
+  // инструментов (см. agents/safetyReviewer.ts). Harness читает MCP resources
+  // напрямую: модель в этом не участвует, поэтому это не agent toolCalls.
+  const profile = await readHealthResource(mcp, "profile://me");
+  const recentLogs = await readHealthResource(mcp, "logs://recent");
+  const reviewerContext = `# ПРОФИЛЬ\n${profile}\n\n# ДНЕВНИК\n${recentLogs}`;
 
   const roundsLog = createRoundsLog();
   const toolCalls: string[] = [];
@@ -196,7 +217,7 @@ export async function runHealthAgent(
 
   for (let round = 1; round <= maxRounds; round++) {
     // Коуч получает только задачу: профиль, дневник и рецепты он добирает сам,
-    // вызывая скиллы. Со второго раунда к задаче добавляются прошлый план и
+    // вызывая MCP tools. Со второго раунда к задаче добавляются прошлый план и
     // замечания ревьюера.
     const coachInput = issues.length
       ? `# ЗАДАЧА\n${task}\n\n# ПРЕДЫДУЩИЙ ПЛАН\n${plan}\n\n# ЗАМЕЧАНИЯ РЕВЬЮЕРА (исправь их и верни план целиком)\n- ${issues.join("\n- ")}`
@@ -228,7 +249,7 @@ export async function runHealthAgent(
       return finish(null, review);
     }
     if (review.verdict === "approve") {
-      toolCalls.push(...(await savePhase(coachPrompt, task, plan, review.score)));
+      toolCalls.push(...(await savePhase(mcp, coachPrompt, task, plan, review.score)));
       return finish(plan, review);
     }
     issues = review.issues; // revise → следующий раунд
@@ -245,10 +266,11 @@ export async function runHealthAgent(
 // ФАЗА СОХРАНЕНИЯ
 //
 // Отдельный агент на той же модели и том же промпте, но с другим набором tools:
-// только savePlan, и toolChoice="required", потому что от него ждут не текста, а
+// только save_health_plan, и toolChoice="required", потому что от него ждут не текста, а
 // одного вызова. Это и есть гейт: право записи выдаёт харнесс сменой
 // конфигурации агента, а не инструкция в промпте (почему именно так —
-// подробно в skills/plans.ts).
+// фильтр в mcp/healthMcp.ts). Промпт не может обеспечить запрет записи:
+// до approve инструмент должен отсутствовать в списке доступных модели.
 //
 // Текст плана передаётся дословно между маркерами: модель здесь ничего не
 // сочиняет, её работа — донести готовый план до инструмента. Прогон обрывается
@@ -260,6 +282,7 @@ export async function runHealthAgent(
 // плана.
 // ─────────────────────────────────────────────────────────────────────────────
 async function savePhase(
+  mcp: MCPServerStdio,
   coachPrompt: string,
   task: string,
   plan: string,
@@ -268,22 +291,23 @@ async function savePhase(
   const document = `# ${task}\n\n_score: ${score}/10_\n\n${plan}`;
   const input =
     `Safety Reviewer одобрил план (score ${score}/10). Сохрани его.\n\n` +
-    `Вызови savePlan и передай в параметре markdown ровно текст между маркерами, ` +
+    `Вызови save_health_plan и передай в параметре markdown ровно текст между маркерами, ` +
     `дословно и целиком, ничего не добавляя и не сокращая.\n\n` +
     `<<<PLAN\n${document}\nPLAN>>>`;
 
   const saver = createHealthCoach(coachPrompt, {
-    tools: SAVING_TOOLS,
+    name: SAVING_AGENT_NAME,
+    mcpServers: [mcp],
     toolChoice: "required",
     stopOnFirstTool: true,
   });
 
   try {
     const reply = await ask(saver, input);
-    if (reply.toolCalls.includes("savePlan")) {
+    if (reply.toolCalls.includes("save_health_plan")) {
       console.log(`\n✅ План одобрен (score ${score}/10), сохранён в data/output.md`);
     } else {
-      console.log("\n⚠️ План одобрен, но агент не вызвал savePlan — файл не обновлён.");
+      console.log("\n⚠️ План одобрен, но агент не вызвал save_health_plan — файл не обновлён.");
     }
     return reply.toolCalls;
   } catch (err) {

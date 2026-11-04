@@ -1,4 +1,4 @@
-import { Agent, type Tool } from "@openai/agents";
+import { Agent, type MCPServer, type Tool } from "@openai/agents";
 
 // Модель в формате OpenRouter: "<вендор>/<модель>". Генерация плана — задача
 // сложнее ревью по чек-листу, поэтому коуч сидит на pro.
@@ -27,13 +27,17 @@ export const COACH_MODEL = process.env.OPENROUTER_COACH_MODEL ?? "deepseek/deeps
 //   stopOnFirstTool=true             — прогон заканчивается на первом же вызове
 // Одного toolChoice мало: resetToolChoice в SDK обещает вернуть выбор в "auto"
 // после первого вызова, но на chat_completions-провайдере это срабатывает не
-// всегда — в одном из прогонов savePlan вызвался три раза подряд. Остановка по
+// всегда — в одном из прогонов сохранение вызвалось три раза подряд. Остановка по
 // первому вызову делает повтор невозможным и заодно экономит лишний оборот к
 // модели: возвращаться к ней после записи файла незачем.
 // ─────────────────────────────────────────────────────────────────────────────
 export type CoachOptions = {
+  /** Разные имена отделяют MCP-права генерации и сохранения. */
+  name?: string;
   /** Инструменты, которые модель видит на этой фазе прогона. */
   tools?: Tool[];
+  /** MCP SDK сам обнаруживает инструменты и исполняет их по протоколу. */
+  mcpServers?: MCPServer[];
   /** "required" — модель обязана вызвать инструмент вместо текстового ответа. */
   toolChoice?: "auto" | "required";
   /** Завершить прогон сразу после первого вызова инструмента, не возвращаясь к модели. */
@@ -41,13 +45,15 @@ export type CoachOptions = {
 };
 
 export function createHealthCoach(instructions: string, options: CoachOptions = {}): Agent {
-  const { tools = [], toolChoice = "auto", stopOnFirstTool = false } = options;
+  const { name = "Health Coach", tools = [], mcpServers = [], toolChoice = "auto", stopOnFirstTool = false } = options;
 
   return new Agent({
-    name: "Health Coach",
+    name,
     instructions,
     model: COACH_MODEL,
     tools,
+    mcpServers,
+    mcpConfig: { convertSchemasToStrict: true, includeServerInToolNames: false },
     modelSettings: { toolChoice },
     toolUseBehavior: stopOnFirstTool ? "stop_on_first_tool" : "run_llm_again",
   });

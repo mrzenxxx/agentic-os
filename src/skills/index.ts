@@ -1,29 +1,16 @@
-import { getProfileTool } from "./profile";
-import { getRecentLogTool } from "./logs";
 import { generateShoppingListTool } from "./shopping";
-import { listFavoriteRecipesTool } from "./recipes";
 import { suggestWorkoutTemplateTool } from "./workouts";
-import { savePlanTool } from "./plans";
 
 /**
- * Наборы инструментов коуча — два простых массива, без реестра и регистрации.
- * Какой набор уходит в агента, решает харнесс, и это единственная развилка.
+ * Локальные инструменты коуча. Доступ к markdown-данным теперь предоставляет
+ * MCP-сервер через agent.mcpServers; здесь только операции подготовки плана.
  */
 
 /**
- * Инструменты фазы генерации: чтение контекста и побочные действия, безопасные
- * до одобрения плана. savePlanTool сюда не входит сознательно — на этой фазе
- * одобренного плана ещё не существует (см. комментарий в skills/plans.ts).
+ * generateShoppingList пишет побочный список покупок, как и до MCP.
+ * Сохранение самого плана гейтится MCP-фильтром в src/mcp/healthMcp.ts.
  */
 export const PLANNING_TOOLS = [
-  getProfileTool,
-  getRecentLogTool,
-  listFavoriteRecipesTool,
   suggestWorkoutTemplateTool,
   generateShoppingListTool,
 ];
-
-/** Инструменты фазы сохранения: доступны только после approve ревьюера. */
-export const SAVING_TOOLS = [savePlanTool];
-
-export { savePlanTool };

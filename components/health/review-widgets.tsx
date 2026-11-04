@@ -199,16 +199,23 @@ export function RoundsHistory({
  * поэтому карта неполная по определению: новый скилл должен показаться в списке
  * сразу, ещё до того, как ему подберут иконку, — отсюда фолбэк в toolPresentation.
  */
-const toolConfig: Record<string, { label: string; icon: LucideIcon }> = {
-  getProfile: { label: "Прочитал профиль", icon: UserRound },
-  getRecentLog: { label: "Поднял записи дневника", icon: NotebookPen },
-  listFavoriteRecipes: { label: "Посмотрел любимые рецепты", icon: ChefHat },
-  suggestWorkoutTemplate: { label: "Взял шаблон тренировки", icon: Dumbbell },
-  generateShoppingList: { label: "Собрал список покупок", icon: ShoppingCart },
-  savePlan: { label: "Сохранил план", icon: Save },
+type ToolPresentation = {
+  label: string;
+  icon: LucideIcon;
+  source?: "MCP" | "Локальный";
 };
 
-function toolPresentation(name: string) {
+const toolConfig: Record<string, ToolPresentation> = {
+  read_profile: { label: "Прочитал профиль", icon: UserRound, source: "MCP" },
+  read_recent_logs: { label: "Поднял записи дневника", icon: NotebookPen, source: "MCP" },
+  append_daily_log: { label: "Добавил запись в дневник", icon: NotebookPen, source: "MCP" },
+  list_recipes: { label: "Посмотрел любимые рецепты", icon: ChefHat, source: "MCP" },
+  save_health_plan: { label: "Сохранил план", icon: Save, source: "MCP" },
+  suggestWorkoutTemplate: { label: "Взял шаблон тренировки", icon: Dumbbell, source: "Локальный" },
+  generateShoppingList: { label: "Собрал список покупок", icon: ShoppingCart, source: "Локальный" },
+};
+
+function toolPresentation(name: string): ToolPresentation {
   return toolConfig[name] ?? { label: name, icon: Wrench };
 }
 
@@ -229,16 +236,20 @@ export function ToolCallsList({ toolCalls, className }: { toolCalls: string[]; c
   return (
     <ol className={cn("space-y-2", className)}>
       {toolCalls.map((name, index) => {
-        const { label, icon: Icon } = toolPresentation(name);
+        const { label, icon: Icon, source } = toolPresentation(name);
         return (
           <li key={`${name}-${index}`} className="flex items-start gap-2.5 text-sm">
             <span className="text-muted-foreground mt-0.5 w-4 shrink-0 text-right tabular-nums">
               {index + 1}
             </span>
             <Icon className="text-primary mt-0.5 size-4 shrink-0" aria-hidden="true" />
-            <span>
-              {label} <code className="text-muted-foreground text-xs">{name}</code>
-            </span>
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                <span className="min-w-0 [overflow-wrap:anywhere]">{label}</span>
+                {source && <Badge variant={source === "MCP" ? "secondary" : "outline"}>{source}</Badge>}
+              </div>
+              <code className="text-muted-foreground text-xs [overflow-wrap:anywhere]">{name}</code>
+            </div>
           </li>
         );
       })}
