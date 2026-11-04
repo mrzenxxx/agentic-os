@@ -53,7 +53,8 @@ export function createHealthCoach(instructions: string, options: CoachOptions = 
     model: COACH_MODEL,
     tools,
     mcpServers,
-    mcpConfig: { convertSchemasToStrict: true, includeServerInToolNames: false },
+    // Внешние схемы берём как есть. SDK сам отделяет одноимённые tools серверов.
+    mcpConfig: { convertSchemasToStrict: false, includeServerInToolNames: true },
     modelSettings: { toolChoice },
     toolUseBehavior: stopOnFirstTool ? "stop_on_first_tool" : "run_llm_again",
   });

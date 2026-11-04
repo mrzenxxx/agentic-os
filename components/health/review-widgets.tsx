@@ -15,6 +15,7 @@ import {
 
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
+import { toolIdentity } from "@/src/mcp/toolIdentity";
 import type { RoundState } from "@/src/harness/rounds";
 import type { Review } from "@/src/harness/validateReview";
 
@@ -202,21 +203,23 @@ export function RoundsHistory({
 type ToolPresentation = {
   label: string;
   icon: LucideIcon;
-  source?: "MCP" | "Локальный";
+  source?: string;
 };
 
 const toolConfig: Record<string, ToolPresentation> = {
-  read_profile: { label: "Прочитал профиль", icon: UserRound, source: "MCP" },
-  read_recent_logs: { label: "Поднял записи дневника", icon: NotebookPen, source: "MCP" },
-  append_daily_log: { label: "Добавил запись в дневник", icon: NotebookPen, source: "MCP" },
-  list_recipes: { label: "Посмотрел любимые рецепты", icon: ChefHat, source: "MCP" },
-  save_health_plan: { label: "Сохранил план", icon: Save, source: "MCP" },
-  suggestWorkoutTemplate: { label: "Взял шаблон тренировки", icon: Dumbbell, source: "Локальный" },
-  generateShoppingList: { label: "Собрал список покупок", icon: ShoppingCart, source: "Локальный" },
+  read_profile: { label: "Прочитал профиль", icon: UserRound, source: "markdown-health" },
+  read_recent_logs: { label: "Поднял записи дневника", icon: NotebookPen, source: "markdown-health" },
+  append_daily_log: { label: "Добавил запись в дневник", icon: NotebookPen, source: "markdown-health" },
+  list_recipes: { label: "Посмотрел любимые рецепты", icon: ChefHat, source: "markdown-health" },
+  save_health_plan: { label: "Сохранил план", icon: Save, source: "markdown-health" },
+  suggestWorkoutTemplate: { label: "Взял шаблон тренировки", icon: Dumbbell, source: "local" },
+  generateShoppingList: { label: "Собрал список покупок", icon: ShoppingCart, source: "local" },
 };
 
 function toolPresentation(name: string): ToolPresentation {
-  return toolConfig[name] ?? { label: name, icon: Wrench };
+  const identity = toolIdentity(name);
+  const presentation = toolConfig[identity.name] ?? { label: identity.name, icon: Wrench };
+  return { ...presentation, source: identity.source ?? presentation.source };
 }
 
 /**
@@ -246,9 +249,9 @@ export function ToolCallsList({ toolCalls, className }: { toolCalls: string[]; c
             <div className="min-w-0 flex-1">
               <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
                 <span className="min-w-0 [overflow-wrap:anywhere]">{label}</span>
-                {source && <Badge variant={source === "MCP" ? "secondary" : "outline"}>{source}</Badge>}
+                {source && <Badge variant={source === "local" ? "outline" : "secondary"}>[{source}]</Badge>}
               </div>
-              <code className="text-muted-foreground text-xs [overflow-wrap:anywhere]">{name}</code>
+              <code className="text-muted-foreground text-xs [overflow-wrap:anywhere]">{toolIdentity(name).name}</code>
             </div>
           </li>
         );

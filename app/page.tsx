@@ -238,6 +238,11 @@ function Result({ result }: { result: HealthAgentResult }) {
         </CardHeader>
         <CardContent>
           <ToolCallsList toolCalls={toolCalls} />
+          {result.saveSummary && (
+            <p className="text-muted-foreground mt-4 text-sm whitespace-pre-wrap [overflow-wrap:anywhere]">
+              {result.saveSummary}
+            </p>
+          )}
         </CardContent>
       </Card>
 

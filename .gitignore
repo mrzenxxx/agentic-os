@@ -5,6 +5,8 @@ node_modules/
 next-env.d.ts
 AGENTS.md
 data/
+plans/*
+!plans/.gitkeep
 
 runs/*
 !runs/run-example.json

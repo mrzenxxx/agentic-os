@@ -2,6 +2,9 @@ import "dotenv/config";
 import OpenAI from "openai";
 import {
   Agent,
+  RunResult,
+  RunState,
+  RunContext,
   run,
   setDefaultOpenAIClient,
   setOpenAIAPI,
@@ -12,7 +15,9 @@ import {
 import { COACH_MODEL, createHealthCoach } from "../agents/healthCoach";
 import { createSafetyReviewer, REVIEWER_MODEL } from "../agents/safetyReviewer";
 import { PLANNING_TOOLS } from "../skills";
-import { createHealthMcpServer, readHealthResource, SAVING_AGENT_NAME } from "../mcp/healthMcp";
+import { SAVING_AGENT_NAME, EXPORT_AGENT_NAME } from "../mcp/healthMcp";
+import { createMcpServers, connectMcpServers, closeMcpServers } from "../mcp/serverRegistry";
+import { readReviewerContext } from "../mcp/reviewerContext";
 import { ACTIVE_PROMPTS, loadPrompt, type PromptVersions } from "./promptVersions";
 import { createRoundsLog, type RoundState } from "./rounds";
 import { finalScore, improved } from "./score";
@@ -120,6 +125,8 @@ export type HealthAgentResult = {
   rounds: RoundState[];
   /** Имена инструментов, вызванных коучем за весь прогон, по порядку. */
   toolCalls: string[];
+  /** Результат записи и явно запрошенных экспортов, отдельно от проверенного плана. */
+  saveSummary: string | null;
   /** Score последнего одобренного раунда; null, если approve не случился. */
   finalScore: number | null;
   /** Вырос ли score на последней ревизии относительно предыдущего раунда. */
@@ -139,23 +146,19 @@ export async function runHealthAgent(
 
   // Соединение не глобальное: отдельный stdio-процесс живёт ровно один прогон.
   // finally срабатывает и при ошибке connect, модели или разбора ревью.
-  const mcp = createHealthMcpServer();
+  const servers = createMcpServers();
   try {
-    await mcp.connect();
-    return await runWithMcp(task, maxRounds, mcp, startedAt);
+    await connectMcpServers(servers);
+    return await runWithMcp(task, maxRounds, servers, startedAt);
   } finally {
-    try {
-      await mcp.close();
-    } catch (err) {
-      console.warn("Не удалось закрыть MCP:", err instanceof Error ? err.message : err);
-    }
+    await closeMcpServers(servers);
   }
 }
 
 async function runWithMcp(
   task: string,
   maxRounds: number,
-  mcp: MCPServerStdio,
+  servers: MCPServerStdio[],
   startedAt: number,
 ): Promise<HealthAgentResult> {
 
@@ -165,22 +168,25 @@ async function runWithMcp(
     coach: ACTIVE_PROMPTS.coach,
     reviewer: ACTIVE_PROMPTS.reviewer,
   };
-  const coachPrompt = loadPrompt("healthCoach", promptVersions.coach);
+  const coachPrompt = loadPrompt("healthCoach", promptVersions.coach) +
+    `\n\nСреда выполнения: сейчас ${new Date().toISOString()} (UTC). ` +
+    `Корень проекта: ${process.cwd()}. ` +
+    `Подключённые MCP-серверы: ${servers.map((server) => server.name).join(", ") || "нет"}. ` +
+    `Не используй отключённые инструменты и не утверждай, что они были вызваны.`;
 
   // Коуч фазы генерации: MCP + локальные инструменты, но без save_health_plan —
   // одобренного плана на этой фазе ещё не существует.
-  const coach = createHealthCoach(coachPrompt, { tools: PLANNING_TOOLS, mcpServers: [mcp] });
+  const coach = createHealthCoach(coachPrompt, { tools: PLANNING_TOOLS, mcpServers: servers });
   const reviewer = createSafetyReviewer(loadPrompt("safetyReviewer", promptVersions.reviewer));
 
   // Ревьюеру контекст по-прежнему приходит текстом: у него нет и не должно быть
   // инструментов (см. agents/safetyReviewer.ts). Harness читает MCP resources
   // напрямую: модель в этом не участвует, поэтому это не agent toolCalls.
-  const profile = await readHealthResource(mcp, "profile://me");
-  const recentLogs = await readHealthResource(mcp, "logs://recent");
-  const reviewerContext = `# ПРОФИЛЬ\n${profile}\n\n# ДНЕВНИК\n${recentLogs}`;
+  const reviewerContext = await readReviewerContext(servers);
 
   const roundsLog = createRoundsLog();
   const toolCalls: string[] = [];
+  let saveSummary: string | null = null;
 
   // Единственная точка выхода из прогона: через неё проходят все три развилки по
   // вердикту, поэтому трейс пишется здесь — и ни один исход не остаётся без файла.
@@ -191,6 +197,7 @@ async function runWithMcp(
       review,
       rounds,
       toolCalls,
+      saveSummary,
       finalScore: finalScore(rounds),
       improved: improved(rounds),
       promptVersions,
@@ -249,7 +256,9 @@ async function runWithMcp(
       return finish(null, review);
     }
     if (review.verdict === "approve") {
-      toolCalls.push(...(await savePhase(mcp, coachPrompt, task, plan, review.score)));
+      const saved = await savePhase(servers, coachPrompt, task, plan, review.score);
+      toolCalls.push(...saved.toolCalls);
+      saveSummary = saved.text;
       return finish(plan, review);
     }
     issues = review.issues; // revise → следующий раунд
@@ -262,56 +271,76 @@ async function runWithMcp(
   return finish(last.plan, last.review);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// ФАЗА СОХРАНЕНИЯ
-//
-// Отдельный агент на той же модели и том же промпте, но с другим набором tools:
-// только save_health_plan, и toolChoice="required", потому что от него ждут не текста, а
-// одного вызова. Это и есть гейт: право записи выдаёт харнесс сменой
-// конфигурации агента, а не инструкция в промпте (почему именно так —
-// фильтр в mcp/healthMcp.ts). Промпт не может обеспечить запрет записи:
-// до approve инструмент должен отсутствовать в списке доступных модели.
-//
-// Текст плана передаётся дословно между маркерами: модель здесь ничего не
-// сочиняет, её работа — донести готовый план до инструмента. Прогон обрывается
-// на первом же вызове (stopOnFirstTool): записывать файл второй раз незачем,
-// и возвращаться к модели после записи тоже.
-//
-// Ошибка этой фазы не роняет прогон: план уже одобрен и уйдёт пользователю в
-// ответе API. Не записанный файл — потеря, но меньшая, чем 500 вместо готового
-// плана.
-// ─────────────────────────────────────────────────────────────────────────────
+// После approve основной план записывается обязательным единственным tool call.
+// Затем exporter получает внешние tools записи для явно запрошенных копий.
+// Ошибка одной записи не отменяет одобренный план и не скрывает предыдущие вызовы.
 async function savePhase(
-  mcp: MCPServerStdio,
+  servers: MCPServerStdio[],
   coachPrompt: string,
   task: string,
   plan: string,
   score: number,
-): Promise<string[]> {
+): Promise<AgentReply> {
   const document = `# ${task}\n\n_score: ${score}/10_\n\n${plan}`;
-  const input =
-    `Safety Reviewer одобрил план (score ${score}/10). Сохрани его.\n\n` +
-    `Вызови save_health_plan и передай в параметре markdown ровно текст между маркерами, ` +
-    `дословно и целиком, ничего не добавляя и не сокращая.\n\n` +
-    `<<<PLAN\n${document}\nPLAN>>>`;
+  const calls: string[] = [];
+  const summaries: string[] = [];
+  const health = servers.find((server) => server.name === "markdown-health");
 
-  const saver = createHealthCoach(coachPrompt, {
-    name: SAVING_AGENT_NAME,
-    mcpServers: [mcp],
-    toolChoice: "required",
-    stopOnFirstTool: true,
-  });
-
-  try {
-    const reply = await ask(saver, input);
-    if (reply.toolCalls.includes("save_health_plan")) {
-      console.log(`\n✅ План одобрен (score ${score}/10), сохранён в data/output.md`);
-    } else {
-      console.log("\n⚠️ План одобрен, но агент не вызвал save_health_plan — файл не обновлён.");
+  const execute = async (agent: Agent, input: string): Promise<AgentReply | null> => {
+    // Держим состояние сами: обычная сетевая ошибка OpenAI API не обязана
+    // содержать error.state, хотя предыдущая запись уже могла выполниться.
+    const state = new RunState(new RunContext(), input, agent, 10);
+    try {
+      const result = await run(agent, state);
+      const reply = { text: String(result.finalOutput ?? ""), toolCalls: collectToolCalls(result.newItems) };
+      calls.push(...reply.toolCalls);
+      return reply;
+    } catch (error) {
+      // SDK сохраняет уже выполненные вызовы в состоянии даже при ошибке.
+      calls.push(...collectToolCalls(new RunResult<unknown, Agent<unknown, any>>(state).newItems));
+      const message = `Сохранение не завершено: ${error instanceof Error ? error.message : error}`;
+      summaries.push(message);
+      console.warn(message);
+      return null;
     }
-    return reply.toolCalls;
-  } catch (err) {
-    console.log(`\n⚠️ Фаза сохранения не удалась: ${err instanceof Error ? err.message : err}`);
-    return [];
+  };
+
+  if (health) {
+    const saver = createHealthCoach(coachPrompt, {
+      name: SAVING_AGENT_NAME,
+      mcpServers: [health],
+      toolChoice: "required",
+      stopOnFirstTool: true,
+    });
+    const saved = await execute(saver,
+      `ФАЗА СОХРАНЕНИЯ. Safety Reviewer одобрил план (score ${score}/10). ` +
+      `Один раз вызови save_health_plan и передай в markdown ровно текст между маркерами, ` +
+      `дословно и целиком.\n\n<<<PLAN\n${document}\nPLAN>>>`);
+    if (saved?.toolCalls.includes("[markdown-health] save_health_plan")) {
+      summaries.push("План сохранён в data/output.md.");
+    } else if (saved) {
+      summaries.push("Основной план не сохранён: агент не вызвал save_health_plan.");
+    }
+  } else {
+    summaries.push("Основное сохранение недоступно: markdown-health отключён.");
   }
+
+  const exporter = createHealthCoach(coachPrompt, {
+    name: EXPORT_AGENT_NAME,
+    mcpServers: servers,
+  });
+  const exported = await execute(exporter,
+    `ФАЗА СОХРАНЕНИЯ — ДОПОЛНИТЕЛЬНЫЕ КОПИИ. Safety Reviewer одобрил план. ` +
+    `Основное сохранение уже обработано, не повторяй его. ` +
+    `Выполни только дополнительные записи, явно запрошенные в исходном запросе. ` +
+    `Если дополнительных назначений не было, ответь «Дополнительные копии не запрошены» ` +
+    `без вызовов инструментов. Недоступные назначения отметь в отчёте.\n\n` +
+    `Исходный запрос: ${task}\n\n` +
+    `Сохраняй дословно весь текст между маркерами. Для Notion можно разбить его ` +
+    `на блоки без потери содержимого. Не переписывай план. ` +
+    `Заверши кратким отчётом: реальные пути/URL успешных записей и ошибки. ` +
+    `Успех утверждай только по успешному ответу инструмента.\n\n` +
+    `<<<PLAN\n${document}\nPLAN>>>`);
+  if (exported?.text) summaries.push(exported.text);
+  return { toolCalls: calls, text: summaries.join("\n") };
 }

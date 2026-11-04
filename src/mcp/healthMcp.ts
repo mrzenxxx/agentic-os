@@ -1,7 +1,7 @@
-import { join } from "node:path";
 import { MCPServerStdio } from "@openai/agents";
 
 export const SAVING_AGENT_NAME = "Health Coach Saver";
+export const EXPORT_AGENT_NAME = "Health Coach Exporter";
 
 class HealthMcpServer extends MCPServerStdio {
   override async callToolResult(...args: Parameters<MCPServerStdio["callToolResult"]>) {
@@ -20,20 +20,17 @@ class HealthMcpServer extends MCPServerStdio {
 }
 
 /** Один экземпляр = один дочерний процесс на прогон. Lifecycle — в harness. */
-export function createHealthMcpServer(): MCPServerStdio {
-  const root = process.cwd();
+export function createHealthMcpServer(options: ConstructorParameters<typeof MCPServerStdio>[0]): MCPServerStdio {
   return new HealthMcpServer({
-    name: "markdown-health",
-    command: process.execPath,
-    args: ["--import", "tsx", join(root, "src/mcp/markdownHealthServer.ts")],
-    cwd: root,
-    cacheToolsList: true,
-    clientSessionTimeoutSeconds: 15,
+    ...options,
     // Фильтр callable: SDK кеширует список отдельно для каждого агента.
-    // Модель генерации физически не видит сохранение, saver видит только его.
+    // Saver получает единственный обязательный save. Exporter не может повторить
+    // его или дописать дневник: экспорт плана не является записью прошедшего дня.
     toolFilter: async ({ agent }, tool) => agent.name === SAVING_AGENT_NAME
       ? tool.name === "save_health_plan"
-      : tool.name !== "save_health_plan",
+      : agent.name === EXPORT_AGENT_NAME
+        ? tool.name !== "save_health_plan" && tool.name !== "append_daily_log"
+        : tool.name !== "save_health_plan",
     // Не превращать исключения клиента в обычный model-visible output.
     errorFunction: null,
   });

@@ -1,4 +1,5 @@
 import type { RunItem } from "@openai/agents";
+import { tracedToolName } from "../mcp/toolIdentity";
 
 /**
  * Трейс вызовов инструментов. Модуль читает элементы прогона Agents SDK и
@@ -21,7 +22,7 @@ export function collectToolCalls(items: RunItem[]): string[] {
     // а ими являются и локальные tools, и MCP tools после конвертации SDK.
     if (item.type !== "tool_call_item") continue;
     if (item.rawItem.type !== "function_call") continue;
-    names.push(item.rawItem.name);
+    names.push(tracedToolName(item.rawItem.name));
   }
 
   return names;
