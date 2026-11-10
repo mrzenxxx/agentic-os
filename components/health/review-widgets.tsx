@@ -5,6 +5,7 @@ import {
   NotebookPen,
   PencilLine,
   Save,
+  Search,
   ShoppingCart,
   Stethoscope,
   TrendingUp,
@@ -18,6 +19,7 @@ import { cn } from "@/lib/utils";
 import { toolIdentity } from "@/src/mcp/toolIdentity";
 import type { RoundState } from "@/src/harness/rounds";
 import type { Review } from "@/src/harness/validateReview";
+import type { RetrievalTrace } from "@/src/rag/types";
 
 export type Verdict = Review["verdict"];
 
@@ -204,6 +206,7 @@ type ToolPresentation = {
   label: string;
   icon: LucideIcon;
   source?: string;
+  sourceLabel?: string;
 };
 
 const toolConfig: Record<string, ToolPresentation> = {
@@ -214,6 +217,7 @@ const toolConfig: Record<string, ToolPresentation> = {
   save_health_plan: { label: "Сохранил план", icon: Save, source: "markdown-health" },
   suggestWorkoutTemplate: { label: "Взял шаблон тренировки", icon: Dumbbell, source: "local" },
   generateShoppingList: { label: "Собрал список покупок", icon: ShoppingCart, source: "local" },
+  searchKnowledge: { label: "Поиск в базе знаний", icon: Search, source: "local", sourceLabel: "База знаний" },
 };
 
 function toolPresentation(name: string): ToolPresentation {
@@ -227,7 +231,7 @@ function toolPresentation(name: string): ToolPresentation {
  * ответ перестаёт быть функцией одного промпта, и без этого списка непонятно,
  * на какие данные агент опирался и что он записал на диск.
  */
-export function ToolCallsList({ toolCalls, className }: { toolCalls: string[]; className?: string }) {
+export function ToolCallsList({ toolCalls, retrievals = [], className }: { toolCalls: string[]; retrievals?: RetrievalTrace[]; className?: string }) {
   if (toolCalls.length === 0) {
     return (
       <p className={cn("text-muted-foreground text-sm", className)}>
@@ -239,7 +243,10 @@ export function ToolCallsList({ toolCalls, className }: { toolCalls: string[]; c
   return (
     <ol className={cn("space-y-2", className)}>
       {toolCalls.map((name, index) => {
-        const { label, icon: Icon, source } = toolPresentation(name);
+        const presentation = toolPresentation(name);
+        const retrieval = retrievals.find((entry) => entry.toolCallIndex === index);
+        const label = retrieval ? `knowledge: ${retrieval.query} → ${retrieval.chunks.length} chunks` : presentation.label;
+        const { icon: Icon, source } = presentation;
         return (
           <li key={`${name}-${index}`} className="flex items-start gap-2.5 text-sm">
             <span className="text-muted-foreground mt-0.5 w-4 shrink-0 text-right tabular-nums">
@@ -249,9 +256,18 @@ export function ToolCallsList({ toolCalls, className }: { toolCalls: string[]; c
             <div className="min-w-0 flex-1">
               <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
                 <span className="min-w-0 [overflow-wrap:anywhere]">{label}</span>
-                {source && <Badge variant={source === "local" ? "outline" : "secondary"}>[{source}]</Badge>}
+                {source && <Badge variant={source === "local" ? "outline" : "secondary"}>{presentation.sourceLabel ?? `[${source}]`}</Badge>}
               </div>
               <code className="text-muted-foreground text-xs [overflow-wrap:anywhere]">{toolIdentity(name).name}</code>
+              {retrieval && retrieval.chunks.length > 0 && (
+                <ul className="text-muted-foreground mt-1 space-y-1 text-xs">
+                  {retrieval.chunks.map((chunk, chunkIndex) => (
+                    <li key={`${chunk.file}-${chunk.heading}-${chunkIndex}`} className="[overflow-wrap:anywhere]">
+                      {chunk.file} / {chunk.heading}
+                    </li>
+                  ))}
+                </ul>
+              )}
             </div>
           </li>
         );

@@ -22,6 +22,8 @@ import { ACTIVE_PROMPTS, loadPrompt, type PromptVersions } from "./promptVersion
 import { createRoundsLog, type RoundState } from "./rounds";
 import { finalScore, improved } from "./score";
 import { collectToolCalls } from "./toolCalls";
+import { collectRetrievals } from "./retrievals";
+import type { RetrievalTrace } from "../rag/types";
 import { traceRun } from "./traceRun";
 import { requestReview, type Review } from "./validateReview";
 
@@ -94,7 +96,7 @@ function ensureProvider() {
 }
 
 /** Ответ агента: финальный текст и имена инструментов, которые он вызвал по пути. */
-type AgentReply = { text: string; toolCalls: string[] };
+type AgentReply = { text: string; toolCalls: string[]; retrievals?: RetrievalTrace[] };
 
 // run(agent, input) — запускает агентный цикл: собирает запрос (system из
 // instructions + наш input как сообщение user), шлёт его через клиент, получает
@@ -111,6 +113,7 @@ async function ask(agent: Agent, input: string): Promise<AgentReply> {
   return {
     text: String(result.finalOutput ?? ""),
     toolCalls: collectToolCalls(result.newItems),
+    retrievals: collectRetrievals(result.newItems),
   };
 }
 
@@ -125,6 +128,8 @@ export type HealthAgentResult = {
   rounds: RoundState[];
   /** Имена инструментов, вызванных коучем за весь прогон, по порядку. */
   toolCalls: string[];
+  /** Запросы RAG и реально найденные источники, без копирования chunks в трейс. */
+  retrievals: RetrievalTrace[];
   /** Результат записи и явно запрошенных экспортов, отдельно от проверенного плана. */
   saveSummary: string | null;
   /** Score последнего одобренного раунда; null, если approve не случился. */
@@ -168,8 +173,9 @@ async function runWithMcp(
     coach: ACTIVE_PROMPTS.coach,
     reviewer: ACTIVE_PROMPTS.reviewer,
   };
+  const runTimeContext = `Среда выполнения: начало запуска ${new Date(startedAt).toISOString()} (UTC).`;
   const coachPrompt = loadPrompt("healthCoach", promptVersions.coach) +
-    `\n\nСреда выполнения: сейчас ${new Date().toISOString()} (UTC). ` +
+    `\n\n${runTimeContext} ` +
     `Корень проекта: ${process.cwd()}. ` +
     `Подключённые MCP-серверы: ${servers.map((server) => server.name).join(", ") || "нет"}. ` +
     `Не используй отключённые инструменты и не утверждай, что они были вызваны.`;
@@ -177,7 +183,9 @@ async function runWithMcp(
   // Коуч фазы генерации: MCP + локальные инструменты, но без save_health_plan —
   // одобренного плана на этой фазе ещё не существует.
   const coach = createHealthCoach(coachPrompt, { tools: PLANNING_TOOLS, mcpServers: servers });
-  const reviewer = createSafetyReviewer(loadPrompt("safetyReviewer", promptVersions.reviewer));
+  const reviewer = createSafetyReviewer(
+    `${loadPrompt("safetyReviewer", promptVersions.reviewer)}\n\n${runTimeContext}`,
+  );
 
   // Ревьюеру контекст по-прежнему приходит текстом: у него нет и не должно быть
   // инструментов (см. agents/safetyReviewer.ts). Harness читает MCP resources
@@ -186,6 +194,7 @@ async function runWithMcp(
 
   const roundsLog = createRoundsLog();
   const toolCalls: string[] = [];
+  const retrievals: RetrievalTrace[] = [];
   let saveSummary: string | null = null;
 
   // Единственная точка выхода из прогона: через неё проходят все три развилки по
@@ -197,6 +206,7 @@ async function runWithMcp(
       review,
       rounds,
       toolCalls,
+      retrievals,
       saveSummary,
       finalScore: finalScore(rounds),
       improved: improved(rounds),
@@ -210,6 +220,7 @@ async function runWithMcp(
       model: { coach: COACH_MODEL, reviewer: REVIEWER_MODEL },
       rounds,
       toolCalls,
+      retrievals,
       finalScore: result.finalScore,
       verdict: review.verdict,
       durationMs: result.durationMs,
@@ -231,6 +242,9 @@ async function runWithMcp(
       : `# ЗАДАЧА\n${task}`;
     const coachReply = await ask(coach, coachInput);
     plan = coachReply.text;
+    retrievals.push(...(coachReply.retrievals ?? []).map((retrieval) => ({
+      ...retrieval, toolCallIndex: retrieval.toolCallIndex + toolCalls.length,
+    })));
     toolCalls.push(...coachReply.toolCalls);
 
     // Ревьюер проверяет план; разбор ответа и один ретрай — в validateReview.

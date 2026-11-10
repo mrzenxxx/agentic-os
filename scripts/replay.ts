@@ -89,6 +89,7 @@ function compare(trace: RunTrace, result: HealthAgentResult) {
     { label: "модель коуча", before: trace.model.coach, after: COACH_MODEL },
     { label: "модель ревьюера", before: trace.model.reviewer, after: REVIEWER_MODEL },
     { label: "toolCalls", before: tools(trace.toolCalls), after: tools(result.toolCalls) },
+    { label: "retrievals", before: JSON.stringify(trace.retrievals ?? []), after: JSON.stringify(result.retrievals) },
     { label: "длительность", before: seconds(trace.durationMs), after: seconds(result.durationMs) },
   ]);
 }

@@ -9,7 +9,8 @@
     "start": "next start",
     "replay": "tsx scripts/replay.ts",
     "eval": "tsx scripts/eval.ts",
-    "mcp:inspect": "tsx scripts/mcpInspect.ts"
+    "mcp:inspect": "tsx scripts/mcpInspect.ts",
+    "ingest": "tsx scripts/ingest.ts"
   },
   "keywords": [],
   "author": "",

@@ -30,6 +30,11 @@
 - `src/harness/rounds.ts` — `RoundState` и история раундов прогона.
 - `src/harness/score.ts` — итоговый score (последний approve) и флаг `improved`.
 - `src/harness/promptVersions.ts` — загрузка промптов из файлов и константа `ACTIVE_PROMPTS`.
+- `src/rag/*.ts` — knowledge chunking, embeddings fetch, Supabase SQL RPC, retriever и локальный searchKnowledge tool.
+- `knowledge/*.md` — учебные рецепты/правила/примеры предпочтений; не личная память.
+- `docs/001_create_knowledge_chunks.sql` — вся схема RAG, HNSW cosine, атомарная замена, backend-only права. Любой SQL для пользователя — отдельный нумерованный файл в docs/.
+- `scripts/ingest.ts` — секция ## = chunk, стабильный id, embeddings до атомарного DELETE+INSERT.
+- `src/harness/retrievals.ts` — запросы/источники из реальных SDK outputs, привязка к toolCalls.
 - `src/harness/toolCalls.ts` — извлечение имён вызванных tools из результата прогона.
 - `src/harness/traceRun.ts` — сборка и запись трейса прогона в `runs/<runId>.json`.
 - `scripts/replay.ts` и `scripts/eval.ts` — повтор задачи из трейса и прогон кейсов. Запускаются через `tsx`, сборки не требуют.
@@ -49,7 +54,8 @@
 - `npm run start` — запускает production server после успешной сборки.
 - `npm install` — восстанавливает зависимости из `package-lock.json`.
 - `npm run replay runs/run-<timestamp>.json` — повторяет задачу из трейса текущим кодом и печатает diff «было / стало».
-- `npm run eval` — прогоняет кейсы из `evals/cases/`, печатает таблицу PASS/FAIL, возвращает ненулевой код при падении кейса. Пять полных прогонов: ~10 минут и реальные деньги на API.
+- `npm run eval` — прогоняет кейсы из `evals/cases/`, печатает таблицу PASS/FAIL, возвращает ненулевой код при падении кейса. Шесть полных прогонов: ~10 минут и реальные деньги на API.
+- `npm run ingest` — перезаливает только knowledge в Supabase pgvector, без дублей. Нужны .env и заранее выполненная SQL-миграция.
 - `npm run mcp:inspect` — запускает enabled stdio-серверы, печатает tools/resources, закрывает процессы; ключ модели не нужен. `npm run mcp:inspect -- --read profile://me` читает markdown resource по URI; `--server weather` выбирает сервер.
 
 Отдельного CLI entrypoint нет: работаем только через интерфейс и API route.
@@ -81,12 +87,12 @@ UI строится на **Tailwind CSS v4 + shadcn/ui**. Стилизуйте �
 
 - Один скилл — один файл в `src/skills/`: чистая функция (её можно звать из харнесса мимо модели) и её обёртка в `tool()` с Zod-схемой параметров.
 - Описание tool'а — это интерфейс для модели, а не комментарий. Пишите в нём не только «что отдаёт», но и «когда вызывать» и «чего там нет», иначе модель дёргает инструмент не к месту или не дёргает вовсе.
-- `PLANNING_TOOLS` в `src/skills/index.ts` содержит только shopping/workouts. MCP tools подключаются через `mcpServers`, без ручных обёрток в `tool()`.
+- `PLANNING_TOOLS` в `src/skills/index.ts` содержит shopping/workouts и searchKnowledge (обычный локальный tool). MCP tools подключаются через `mcpServers`, без ручных обёрток в `tool()`.
 - Каждый enabled MCP-сервер живёт отдельным stdio-процессом на прогон; все соединения закрываются в `finally`, включая ошибки частичного запуска. Конфиг — единственное место добавления интеграций, внешние tools без своих обёрток. `tsx` требуется во время выполнения, не только разработки. stdout сервера — только JSON-RPC, логи — stderr. Сетевые MCP-транспорты не добавлять.
 - **Tools только у коуча.** У Safety Reviewer их нет и быть не должно: вердикт обязан быть функцией входа, а сторона, одобряющая запись, сама на диск не пишет. Подробнее — в комментарии `src/agents/safetyReviewer.ts`.
 - **Запись плана гейтит harness.** `save_health_plan` скрыт от планировщика; внешние tools доступны до approve только с MCP-аннотацией `readOnlyHint: true` (без аннотации — после approve). После approve `Health Coach Saver` получает только обязательный save_health_plan с required/stop_on_first_tool. Затем `Health Coach Exporter` получает внешние tools записи для дополнительных копий. У exporter нет save_health_plan; append_daily_log скрыт от обоих. Фаза заранее создаёт публичный RunState и сохраняет частичные toolCalls через RunResult(state), в том числе при сетевой ошибке. Аннотации — подсказки сервера, не замена allowed directories/правам integration.
 - **Промпт — просьба, конфиг — стена.** Filesystem запускается только для абсолютных data/ и plans/, с `--confine-roots`; не расширять до корня проекта. Notion включается по непустому NOTION_TOKEN, права internal integration только на Wellness. Weather — read-only Open-Meteo, без ключа. Все транспорты stdio; OAuth не добавлять.
-- Погодный город брать из profile.md, координаты получать готовым geocoding tool. Не хардкодить локацию в коде. Активен `healthCoach.v4.md`: прогноз для тренировок на улице, перенос в помещение при плохой погоде, ограничения экспорта. Новые изменения промпта — новым файлом версии.
+- Погодный город брать из profile.md, координаты получать готовым geocoding tool. Не хардкодить локацию в коде. Активен `healthCoach.v5.md`: RAG перед wellness-планом, прогноз для тренировок на улице, перенос в помещение при плохой погоде, ограничения экспорта. Новые изменения промпта — новым файлом версии.
 - Ревьюер не подключён к MCP. Harness читает `profile://me` и `logs://recent` (7 записей) и передаёт ему текст; при отключённом markdown-health читает профиль и последние 200 строк дневника через filesystem, если он включён; если выключены оба — указывает отсутствие источника. Это не tool calls модели и не добавляется в `toolCalls`.
 - `append_daily_log` дописывает запись с датой UTC, только по просьбе пользователя записать реальные факты. План нельзя выдавать за выполненный день. `read_recent_logs.days` — число последних записей (1–30), не календарное окно.
 - Имена вызванных инструментов собираются из результата прогона (`src/harness/toolCalls.ts`), уходят в `HealthAgentResult.toolCalls` как `[источник] tool` и показываются в UI блоком «Что сделал агент» с меткой сервера или local. SDK сам добавляет namespace к tools; общий toolIdentity преобразует имена для trace/UI. `saveSummary` показывает фактический отчёт о записи отдельно от проверенного плана. Скиллы о том, что их считают, не знают.
@@ -121,3 +127,23 @@ UI строится на **Tailwind CSS v4 + shadcn/ui**. Стилизуйте �
 
 - Поддерживать кодовую базу в высокомодульном состоянии и с хорошей документацией.
 - Следовать принципу «разделения ответственности» (separation of concerns).
+
+## RAG V7
+
+- profile/log остаются в data/ и MCP. В Supabase загружаются только knowledge/*.md.
+- searchKnowledge: один embed исходного query и один cosine search; без rewriting,
+  reranking, hybrid search или RAG-фреймворка. Модель из EMBEDDING_MODEL, 1536 измерений.
+- SUPABASE_SECRET_KEY (или legacy SUPABASE_SERVICE_ROLE_KEY) — backend-only,
+  никаких NEXT_PUBLIC_ или импорта runtime-конфига в клиент. Для нового sb_secret_ ключа
+  используется apikey; legacy JWT дополнительно передаётся в Authorization.
+- В HealthAgentResult/RunTrace retrievals: query, file/heading/similarity, toolCallIndex.
+  Метаданные собираются из SDK outputs; tool не пишет trace и не использует глобальный лог.
+- UI: значок Search и knowledge: query → N chunks с меткой «База знаний», источники под вызовом.
+- personal_preferences.md — вымышленные учебные примеры, реальный профиль важнее.
+- Шестой eval knowledge-based-recipe требует успешного retrieval с recipes.md.
+  Прежние пять кейсов и медицинские ограничения не ослаблять ради зелёной таблицы.
+
+- safetyReviewer.v3 различает бытовой wellness-запрос и клиническую цель/опасные
+  симптомы. Общий щадящий режим при усталости допускается без диагноза/лечения;
+  при сохраняющемся ухудшении нужна рекомендация врачебной оценки. Лекарства,
+  диагностика, лечение и опасные симптомы остаются needs_human_professional.

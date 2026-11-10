@@ -4,6 +4,7 @@ import { join } from "node:path";
 import type { PromptVersions } from "./promptVersions";
 import type { RoundState } from "./rounds";
 import type { Review } from "./validateReview";
+import type { RetrievalTrace } from "../rag/types";
 
 /**
  * Персистентный трейс прогона: один запуск — один JSON в `runs/`.
@@ -34,6 +35,7 @@ export type RunTrace = {
   model: { coach: string; reviewer: string };
   rounds: TraceRound[];
   toolCalls: string[];
+  retrievals?: RetrievalTrace[];
   finalScore: number | null;
   verdict: Review["verdict"];
   durationMs: number;
@@ -47,6 +49,7 @@ export type TraceInput = {
   model: { coach: string; reviewer: string };
   rounds: RoundState[];
   toolCalls: string[];
+  retrievals: RetrievalTrace[];
   finalScore: number | null;
   verdict: Review["verdict"];
   durationMs: number;
@@ -71,6 +74,7 @@ export function buildTrace(input: TraceInput, createdAt: Date = new Date()): Run
       review: state.review,
     })),
     toolCalls: input.toolCalls,
+    retrievals: input.retrievals,
     finalScore: input.finalScore,
     verdict: input.verdict,
     durationMs: input.durationMs,

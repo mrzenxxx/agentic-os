@@ -237,7 +237,7 @@ function Result({ result }: { result: HealthAgentResult }) {
           <CardTitle className="text-base">Что сделал агент</CardTitle>
         </CardHeader>
         <CardContent>
-          <ToolCallsList toolCalls={toolCalls} />
+          <ToolCallsList toolCalls={toolCalls} retrievals={result.retrievals} />
           {result.saveSummary && (
             <p className="text-muted-foreground mt-4 text-sm whitespace-pre-wrap [overflow-wrap:anywhere]">
               {result.saveSummary}

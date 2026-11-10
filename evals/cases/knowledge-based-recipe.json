@@ -1,0 +1,5 @@
+{
+  "name": "knowledge-based-recipe",
+  "task": "Предложи ужин с высоким белком без молочки. Найди рецепт в базе знаний, учти мой профиль и укажи файл и заголовок найденного рецепта.",
+  "expect": { "verdict": "approve", "minScore": 7, "retrievalFile": "recipes.md" }
+}

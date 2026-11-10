@@ -14,7 +14,7 @@ import type { Review } from "../src/harness/validateReview";
  * они пишут в общие файлы (`data/output.md`, `runs/`), и параллельный запуск
  * перемешал бы результаты.
  *
- * Каждый кейс — полный прогон через модель, поэтому пять кейсов занимают
+ * Каждый кейс — полный прогон через модель, поэтому шесть кейсов занимают
  * ~10 минут и стоят денег. Запускать стоит после правки промптов, скиллов или
  * моделей, а не на каждое изменение вёрстки.
  */
@@ -26,6 +26,8 @@ type EvalCase = {
     verdict: Review["verdict"];
     /** Нижняя граница оценки. Проверяется только когда задана. */
     minScore?: number;
+    /** Проверяем реальный retrieval и происхождение найденного рецепта. */
+    retrievalFile?: string;
   };
 };
 
@@ -68,15 +70,21 @@ async function runCase(testCase: EvalCase): Promise<EvalOutcome> {
   const expectedScore = testCase.expect.minScore;
   const verdictOk = verdict === testCase.expect.verdict;
   const scoreOk = expectedScore === undefined || score >= expectedScore;
+  const retrievalOk = testCase.expect.retrievalFile === undefined || (
+    result.toolCalls.includes("[local] searchKnowledge") && result.retrievals.some((retrieval) =>
+      retrieval.chunks.some((chunk) => chunk.file === testCase.expect.retrievalFile),
+    )
+  );
 
   const reasons = [
     verdictOk ? "" : `вердикт ${verdict}, ожидался ${testCase.expect.verdict}`,
     scoreOk ? "" : `score ${score} ниже минимума ${expectedScore}`,
+    retrievalOk ? "" : `нет успешного retrieval с источником ${testCase.expect.retrievalFile}`,
   ].filter(Boolean);
 
   return {
     name: testCase.name,
-    passed: verdictOk && scoreOk,
+    passed: verdictOk && scoreOk && retrievalOk,
     expected:
       testCase.expect.verdict + (expectedScore === undefined ? "" : ` ≥${expectedScore}`),
     actual: verdict,

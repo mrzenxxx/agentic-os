@@ -1,14 +1,16 @@
 # Health Coach Agent
 
 Коуч по образу жизни (питание, тренировки, восстановление) с обязательной проверкой
-плана вторым агентом. В V5 собственный и готовые внешние MCP-серверы подключаются
-через один конфиг по stdio. Цикл ревью, оценки, traces, replay и evals остаются в harness.
+плана вторым агентом. В V7 личная память читается через MCP, а учебная база знаний
+находится семантическим поиском в Supabase pgvector. Собственный и внешние
+MCP-серверы подключаются через один конфиг по stdio; цикл ревью остаётся в harness.
 
 ## Запуск
 
 ```bash
 cp .env.example .env   # вписать OPENROUTER_API_KEY
 npm install            # Node.js >= 22
+# Перед первым RAG-запуском: настрой Supabase, выполни SQL и npm run ingest (ниже).
 npm run dev            # http://localhost:3000
 ```
 
@@ -38,7 +40,11 @@ src/mcp/serverRegistry.ts    общий lifecycle и фазовый фильтр
 src/mcp/healthMcp.ts          клиент своего сервера, проверка ошибок, чтение resources
 src/mcp/reviewerContext.ts   контекст ревьюера через resources / filesystem fallback
 src/mcp/toolIdentity.ts      источник tool для трейса и UI
-src/skills/*.ts               локальные shopping/workouts + файловый helper
+src/skills/*.ts               локальные shopping/workouts, массив tools + файловый helper
+src/rag/*.ts                 chunking, embeddings, Supabase RPC, retriever и локальный tool
+knowledge/*.md               учебные знания: 5 файлов по 12 секций
+docs/001_create_knowledge_chunks.sql  вся RAG-схема, индекс, RPC и права
+docs/002_inspect_knowledge.sql        проверка количества, дублей, размерности и прав
 src/harness/runHealthAgent.ts оркестратор: провайдер, цикл коуч ↔ ревьюер, фазы tools
 src/harness/validateReview.ts схема ревью, разбор JSON и один ретрай
 src/harness/rounds.ts         RoundState и история раундов
@@ -49,6 +55,7 @@ src/harness/traceRun.ts       запись трейса прогона в runs/<
 scripts/replay.ts             повтор задачи из трейса текущим кодом
 scripts/eval.ts               прогон кейсов из evals/cases и таблица PASS/FAIL
 scripts/mcpInspect.ts         список MCP tools и resources без вызовов модели
+scripts/ingest.ts             embeddings knowledge и атомарная замена индекса
 evals/cases/*.json            кейсы: { name, task, expect }
 runs/*.json                   трейсы прогонов (в .gitignore, кроме run-example.json)
 data/profile.md               профиль пользователя (MCP)
@@ -63,6 +70,8 @@ plans/*.md                   дополнительные копии одобр�
 
 1. UI шлёт `POST /api/agent/run` с `{ task }`.
 2. `runHealthAgent(task)` читает конфиг, запускает enabled MCP-процессы и передаёт коучу задачу.
+   Перед wellness-планом коуч вызывает локальный `searchKnowledge`, затем использует
+   найденные знания с учётом личного профиля. Запрос и найденные заголовки пишутся в trace.
    Коуч достаёт профиль, дневник и рецепты через MCP tools. Harness читает
    `profile://me` и `logs://recent`, чтобы передать ревьюеру фиксированный контекст.
    При отключённом markdown-health профиль и последние 200 строк дневника читаются
@@ -91,6 +100,8 @@ plans/*.md                   дополнительные копии одобр�
   review: { verdict, score, issues },   // ревью последнего раунда
   rounds: { round, plan, review }[],    // трейс всех раундов
   toolCalls: string[],                  // "[источник] tool", по порядку
+  retrievals: { toolCallIndex: number, query: string,
+    chunks: { file: string, heading: string, similarity: number }[] }[],
   saveSummary: string | null,           // отчёт о записи, включая ошибки/URL Notion
   finalScore: number | null,            // score последнего approve
   improved: boolean,                    // вырос ли score на последней ревизии
@@ -100,6 +111,94 @@ plans/*.md                   дополнительные копии одобр�
 ```
 
 `maxRounds` — второй параметр `runHealthAgent(task, maxRounds = 3)`.
+
+## Memory vs RAG
+
+`data/profile.md` и `data/log.md` — личная память: кто пользователь, какие у него
+цели, ограничения и что происходило в его жизни.
+Она остаётся в markdown и читается через MCP, в Supabase её не переносим.
+`knowledge/` — база знаний: какие рецепты, правила питания, тренировок и восстановления
+умеет использовать коуч, а не факты о конкретном человеке.
+RAG превращает разделы этой базы в embeddings и находит подходящие разделы по смыслу запроса.
+Коуч получает найденные тексты с названиями источников и применяет их с учётом личной памяти.
+Даже `personal_preferences.md` здесь содержит только вымышленные учебные примеры:
+настоящий профиль всегда имеет приоритет.
+
+### Настройка Supabase и embeddings
+
+1. Выбери отдельный Supabase-проект для этой учебной базы. В его SQL Editor один раз
+   выполни целиком [`docs/001_create_knowledge_chunks.sql`](docs/001_create_knowledge_chunks.sql).
+   В соответствии с договорённостью весь SQL находится в `docs/`, вместо первоначального
+   пути `supabase/migrations/001_knowledge.sql`; отдельной расходящейся копии нет.
+   Если миграция уже выполнена, но ingest падает с `DELETE requires a WHERE clause`,
+   выполни [`docs/003_fix_knowledge_safeupdate.sql`](docs/003_fix_knowledge_safeupdate.sql):
+   он обновляет функцию загрузки для совместимости с Supabase safeupdate, сохраняя данные и права.
+2. В локальном `.env` задай `SUPABASE_URL` и backend-ключ `SUPABASE_SECRET_KEY`
+   (`sb_secret_...`). Legacy `SUPABASE_SERVICE_ROLE_KEY` также поддерживается.
+   Не используй publishable/anon-ключ и не добавляй префикс `NEXT_PUBLIC_`.
+3. Задай `EMBEDDING_MODEL`, например `openai/text-embedding-3-small`, и
+   `EMBEDDING_BASE_URL=https://openrouter.ai/api/v1`. С текущим OpenRouter используется
+   `OPENROUTER_API_KEY`; для другого OpenAI-compatible endpoint задай `EMBEDDING_API_KEY`
+   и соответствующие base URL и модель. Запрос идёт в `/embeddings`, без SDK-обёртки.
+4. Выполни:
+
+```bash
+npm run ingest
+npm run ingest   # тот же набор: без дублей
+```
+
+Размерность схемы — **1536**: модель должна поддерживать этот размер embedding.
+Расширение pgvector создаётся в стандартной схеме `extensions`. Если оно уже
+установлено в другой схеме, миграция остановится до создания таблицы с явным
+сообщением; она не перемещает расширение и зависимости других приложений.
+Ingest и поиск используют один код и одну модель из `.env`. После правок файлов
+в `knowledge/` тоже выполняй `npm run ingest`, чтобы обновить индекс. При смене модели
+нужно выполнить ingest заново; одинаковая размерность разных моделей не делает
+их векторы совместимыми. `EMBEDDING_API_KEY`, backend-ключ Supabase и `.env` остаются
+на сервере и не передаются в UI или модель коуча.
+
+В базе одна таблица `knowledge_chunks`: `id` (стабильный SHA-256 от file/heading),
+`file`, `heading`, `content`, `embedding vector(1536)`, уникальность file/heading.
+HNSW-индекс использует `vector_cosine_ops`. SQL RPC `match_knowledge_chunks`
+возвращает topK по cosine distance, similarity вычисляется как `1 - distance`.
+Таблица закрыта RLS, функции и операции доступны только backend-роли `service_role`.
+Тексты SQL-функций и вся схема находятся в миграции, никакой SQL генерации моделью нет.
+
+Ингест читает только обычные `knowledge/*.md`, разделяет по `##` и считает каждую
+секцию отдельным chunk с file/heading. Пять файлов содержат по 12 секций — всего 60 chunks.
+Сначала получаются все embeddings пакетами по 16, затем `replace_knowledge_chunks`
+в одной транзакции удаляет старые строки и вставляет новые. Если embeddings или
+INSERT завершились ошибкой, прежний индекс остаётся; параллельные ingest сериализуются.
+Проверочные SELECT и проверка прав находятся в [`docs/002_inspect_knowledge.sql`](docs/002_inspect_knowledge.sql).
+[`docs/000_local_pgvector_roles.sql`](docs/000_local_pgvector_roles.sql) нужен только
+для изолированной проверки на обычном Postgres с pgvector; в Supabase роли уже есть.
+
+### Поиск и демо
+
+`searchKnowledge(query, topK = 5)` — один embedding исходного query и один SQL
+similarity search через Supabase Data API (`fetch` → RPC). Нет reranking, hybrid
+search, query rewriting, LangChain или LlamaIndex. Это обычный локальный tool,
+рядом с shopping/workouts; MCP отвечает за личную память и внешние интеграции.
+Без настройки Supabase запрос с RAG завершается понятной ошибкой настройки,
+без подмены pgvector-поиска чтением файла или вымышленными результатами.
+
+В UI введи: **«Предложи ужин с высоким белком без молочки»**.
+Коуч сначала ищет знания, читает профиль и выбирает найденный рецепт. Источники
+показаны в списке действий; по явной просьбе коуч укажет файл и заголовок в плане. В «Что сделал агент» будет значок поиска
+и `knowledge: <query> → N chunks` с меткой «База знаний», ниже — названия найденных источников.
+В `runs/*.json` поле `retrievals` содержит настоящий query, file/heading/similarity
+найденных chunks и индекс соответствующего tool call; целиком тексты chunks в трейс
+не копируются. Список `toolCalls` по-прежнему содержит `[local] searchKnowledge`.
+
+Шестой кейс `evals/cases/knowledge-based-recipe.json` проверяет не только approve
+и score, но и фактический вызов retrieval с найденным `recipes.md`. Для этого
+`expect.retrievalFile` добавлен в существующий eval runner; остальные пять кейсов
+сохраняют прежние условия. Для запуска `npm run eval` нужны готовый индекс и ключи.
+
+Справка: [Supabase vector columns](https://supabase.com/docs/guides/ai/vector-columns),
+[HNSW](https://supabase.com/docs/guides/ai/vector-indexes/hnsw-indexes),
+[ключи Supabase](https://supabase.com/docs/guides/getting-started/api-keys),
+[OpenRouter embeddings](https://openrouter.ai/docs/api/api-reference/embeddings/submit-an-embedding-request).
 
 ## До MCP / После MCP
 
@@ -190,7 +289,7 @@ Notion по умолчанию выключен: `enabled: Boolean(notionToken)`
 - **Filesystem:** сервер запущен с абсолютными путями только `data/` и `plans/`
   и флагом `--confine-roots`. Он отклоняет доступ к `.env`, исходникам, соседним
   каталогам и выход наружу через symlink; клиентские Roots не могут расширить
-  разрешённые каталоги. В `healthCoach.v4.md` дополнительно сказано работать
+  разрешённые каталоги. В `healthCoach.v5.md` дополнительно сказано работать
   только внутри этих двух папок. Внутри них сервер имеет чтение и запись:
   это не разграничение прав между отдельными файлами и не OS-песочница процесса.
 - **Notion:** создай internal integration с чтением/добавлением/обновлением,
@@ -312,7 +411,7 @@ npm run eval
 то есть это тест safety gate, а не качества плана. Если после правки промптов он
 позеленел «сам собой» — значит, вы сломали именно его.
 
-Пять кейсов — это пять полных прогонов, около 10 минут и реальные деньги на API.
+Шесть кейсов — это шесть полных прогонов, около 10 минут и реальные деньги на API.
 Запускать после правки промптов, скиллов или моделей, а не на каждое изменение вёрстки.
 
 ## Версии промптов
@@ -320,7 +419,7 @@ npm run eval
 Промпты агентов лежат в `prompts/<agent>.<version>.md`, активные версии задаёт
 `ACTIVE_PROMPTS` в `src/harness/promptVersions.ts`. Чтобы поменять поведение агента,
 не трогая код: положить рядом новую версию и переключить константу. Сейчас активны
-`healthCoach.v4.md` (конфиг MCP, погода, ограничения экспорта) и `safetyReviewer.v2.md`. Версия,
+`healthCoach.v5.md` (RAG, MCP, погода, ограничения экспорта) и `safetyReviewer.v3.md`. Версия,
 которой отработал прогон, возвращается в `promptVersions` и видна в UI.
 
 ## Что изменилось при переносе из V0
@@ -352,3 +451,10 @@ npm run eval
 | `OPENROUTER_BASE_URL` | адрес OpenAI-совместимого API | `https://openrouter.ai/api/v1` |
 | `OPENROUTER_COACH_MODEL` | модель коуча | `deepseek/deepseek-v4-pro-0813` |
 | `OPENROUTER_REVIEWER_MODEL` | модель ревьюера | `deepseek/deepseek-v4-flash-0731` |
+
+В V7 `safetyReviewer.v3.md` уточняет границу между бытовым wellness-запросом
+и клинической задачей: безопасный общий режим при усталости не равен диагностике,
+но сохраняющееся необъяснимое ухудшение требует рекомендации врачебной оценки.
+Запросы на лекарства/лечение и явные опасные симптомы по-прежнему направляются
+к специалисту независимо от текста плана. Условия прежних eval-кейсов не меняются.
+Справочный контекст: [NHS — tiredness and fatigue](https://www.nhs.uk/symptoms/tiredness-and-fatigue/).
