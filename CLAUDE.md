@@ -6,10 +6,14 @@
 
 Это локальное Next.js App Router приложение для запуска Health Coach Agent через веб-интерфейс.
 
-- `app/page.tsx` — клиентская страница с textarea, кнопкой запуска и блоком результата (на shadcn/ui).
+- `app/page.tsx` — useChat: один чат, история в памяти, отправка последнего сообщения, disabled-input и автоскролл.
 - `app/layout.tsx` — root layout, подключает шрифт `Inter` через `next/font`, `globals.css` и skip-link.
 - `app/globals.css` — Tailwind v4 + дизайн-токены темы (см. «Дизайн-система и UI»).
 - `app/api/agent/run/route.ts` — POST endpoint `/api/agent/run`, вызывает harness.
+- `app/api/chat/route.ts` — UIMessage SSE через Vercel AI SDK 7: события и выдача проверенного плана после approve.
+- `components/chat/*` — нативные HTML/SVG, CSS module, таймлайн и карточка специалиста; без UI-библиотек.
+- `src/chat/types.ts`, `src/chat/request.ts` — типы data-частей и проверка последней user-задачи.
+- `src/harness/events.ts` — безопасный onEvent и lifecycle-listeners tools; без tool outputs и черновиков.
 - `components/ui/*` — примитивы shadcn/ui (button, card, badge, alert, textarea, label, skeleton, separator).
 - `components/health/review-widgets.tsx` — презентационные виджеты ревью: `VerdictBadge`, `ScoreMeter`, `RoundsIndicator`, `RoundsHistory`, `RunMeta`, `ToolCallsList`, `verdictConfig`.
 - `lib/utils.ts` — хелпер `cn()` (clsx + tailwind-merge) для shadcn.
@@ -64,7 +68,9 @@
 
 Проект использует TypeScript, ESM и `strict` режим. Соблюдайте 2 пробела, именуйте React-компоненты в `PascalCase`, функции и переменные в `camelCase`, типы в `PascalCase`. Для runtime validation используйте Zod, как в `ReviewSchema`. Сохраняйте существующий стиль: небольшие focused-файлы, явные типы на публичных результатах.
 
-UI строится на **Tailwind CSS v4 + shadcn/ui**. Стилизуйте через utility-классы Tailwind и семантические токены темы (`bg-background`, `text-foreground`, `bg-primary` и т.п.), а не через inline styles или сырой hex. Классы объединяйте через `cn()` из `lib/utils.ts`. Иконки — только из `lucide-react` (никаких emoji). Новые примитивы добавляйте через `npx shadcn@latest add <component>` в `components/ui/`; составные виджеты — в `components/health/`.
+Чат V8 строится на нативных HTML-элементах, CSS module и простых SVG-иконках,
+без UI-библиотек и emoji. Цвета берутся из семантических CSS-переменных темы.
+Старые Tailwind/shadcn-примитивы и виджеты ревью сохранены, но новым чатом не используются.
 
 Одна особенность CLI: сгенерированные примитивы импортируют `cn` из пакета `cn`. После каждого `shadcn add` переписывайте импорт на `@/lib/utils`, чтобы в проекте оставалась одна реализация `cn()`.
 
@@ -72,11 +78,11 @@ UI строится на **Tailwind CSS v4 + shadcn/ui**. Стилизуйте �
 
 Направление — **Calm cyan-green (health-tech)**, только светлая тема (dark mode намеренно не добавлен).
 
-- **Стек:** Tailwind v4 (`@tailwindcss/postcss`, CSS-first), shadcn/ui (base `radix`, preset `nova`), `lucide-react`, шрифт `Inter` (`next/font`, переменная `--font-inter`).
+- **Стек чата:** `@ai-sdk/react` useChat, `ai` DefaultChatTransport, нативные HTML/CSS module/SVG; шрифт Inter через `next/font`. Tailwind и shadcn остаются для старых компонентов.
 - **Токены:** объявлены в `:root` внутри `app/globals.css` и проброшены в Tailwind через `@theme inline`. Базовая палитра — cyan (`--primary #0e7490`) на светлом cyan-фоне (`--background #f5fbfc`), текст `--foreground #123c49`. Значения подобраны под контраст WCAG AA. Меняйте цвета только здесь, не в компонентах.
 - **Dark mode:** вариант `dark` объявлен через `@custom-variant`, но переопределений токенов нет. Это осознанно: утилиты `dark:*` в примитивах shadcn компилируются и остаются мёртвыми, вместо того чтобы срабатывать от системной темы и ломать палитру.
 - **Семантика статусов:** цвет вердикта передаётся цветом + иконкой + текстом (правило `color-not-only`). Маппинг живёт в `verdictConfig` (`components/health/review-widgets.tsx`): `approve` → emerald, `revise` → amber, `needs_human_professional` → red. Для статусов используются встроенные шкалы Tailwind (emerald/amber/red), а не кастомные токены.
-- **Информативность результата:** `ScoreMeter` (индикатор 0–10 с цветом по порогу и `role="meter"`), `RoundsIndicator` (раунды ревью), `ReviewIssues` (замечания ревьюера, свёрнутые по умолчанию — это трейс проверки, а не часть ответа; разворачиваются сами только при `needs_human_professional`), `ToolCallsList` («Что сделал агент»), `RunMeta` (длительность прогона и версии промптов), `RoundsHistory` (свёрнутая история раундов), кнопка «Копировать» плана. Loading использует `Skeleton`; empty-state — нумерованные шаги ревью.
+- **Результат чата:** таймлайн этапов с обновлением по id, отдельные строки tools с `[mcp]`/`[local]`/`[rag]`, query RAG, verdict/score каждого ревью, Revising (round N), текст только после approve. needs_human_professional — карточка «Требуется специалист» с issues; exhausted revise — issues без плана. Внизу verdict/score, детали с версиями и длительностью.
 - **A11y:** skip-link в layout, `aria-live` на статусе, видимые focus-ring, touch-friendly CTA (`size="lg"` + `min-h-11`), уважается `prefers-reduced-motion`. Пустая задача даёт inline-ошибку рядом с полем, а не отключённую кнопку.
 
 При правках UI придерживайтесь чек-листа: контраст ≥4.5:1, один primary-CTA на экран, transitions 150–300 мс, проверка на 375/768/1024/1440 px без горизонтального скролла.
@@ -99,8 +105,16 @@ UI строится на **Tailwind CSS v4 + shadcn/ui**. Стилизуйте �
 
 ## Тестирование
 
-Автоматические тесты пока не настроены. Перед сдачей изменений минимум запускайте `npm run build` (он же прогоняет TypeScript). Для изменений UI вручную проверьте `npm run dev`: idle, running (skeleton + спиннер на кнопке), result (score-meter, раунды, замечания, «Копировать»), warning при `needs_human_professional`, а также error (пустая задача / отсутствие ключа). Для изменений harness проверьте, что одобренный план записывается в `data/output.md`, а результат содержит `rounds`, `toolCalls`, `finalScore`, `promptVersions` и `durationMs`. Для изменений скиллов — что в `toolCalls` попали ожидаемые имена и что побочные файлы (`data/shopping.md`) обновились.
+Автоматические тесты пока не настроены. Перед сдачей изменений минимум запускайте `npm run build` (он же прогоняет TypeScript). Для чата вручную проверьте пустую задачу, живые этапы и disabled-ввод, выдачу проверенного текста, revise/revising, карточку специалиста и сетевую ошибку; второе сообщение остаётся в одном чате, обновление очищает историю. Для изменений harness проверьте, что одобренный план записывается в `data/output.md`, а прежний JSON API по-прежнему содержит `rounds`, `toolCalls`, `finalScore`, `promptVersions` и `durationMs`. Для изменений скиллов — что в `toolCalls` попали ожидаемые имена и что побочные файлы (`data/shopping.md`) обновились.
 При написании кода агентом не пиши тесты и не используй TDD.
+
+## События и чат V8
+
+- `runHealthAgent(task, maxRounds = 3, onEvent?)`: callback синхронный, необязательный; ошибки подписчика не влияют на результат. Старый API и evals вызывают функцию как прежде.
+- Цикл, промпты, права tools и safety gate не переписывать ради UI. Наблюдение — через hooks на экземплярах агентов, cleanup в finally.
+- SSE data-event обновляется по id; data-result не содержит plan или rounds. До approve план в поток не попадает. Проверенный текст выдаётся порциями, без повторной генерации.
+- История только в useChat, без localStorage/sessionStorage/БД. Пользователь подтвердил: harness получает последнее сообщение, не весь диалог. Существующие traces отдельных запусков сохраняются как раньше.
+- Не объявлять каждую текстовую часть screen reader: один общий status для осмысленных переходов. Автоскролл не перетягивает пользователя при чтении истории; observers очищаются.
 
 ## Коммиты и pull request
 

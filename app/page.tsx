@@ -1,286 +1,136 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import { AlertTriangle, Check, Copy, Loader2, Play } from "lucide-react";
+import { useChat } from "@ai-sdk/react";
+import { DefaultChatTransport } from "ai";
+import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
+import { ChatMessageView, messageEvents, messageResult, stageLabels } from "@/components/chat/message";
+import { ChatIcon } from "@/components/chat/icons";
+import type { ChatMessage } from "@/src/chat/types";
+import styles from "@/components/chat/chat.module.css";
 
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Label } from "@/components/ui/label";
-import { Separator } from "@/components/ui/separator";
-import { Skeleton } from "@/components/ui/skeleton";
-import { Textarea } from "@/components/ui/textarea";
-import {
-  RoundsHistory,
-  RoundsIndicator,
-  ReviewIssues,
-  RunMeta,
-  ScoreMeter,
-  ToolCallsList,
-  VerdictBadge,
-  verdictConfig,
-} from "@/components/health/review-widgets";
-import type { HealthAgentResult } from "@/src/harness/runHealthAgent";
-
-type State =
-  | { status: "idle" }
-  | { status: "running" }
-  | { status: "result"; result: HealthAgentResult }
-  | { status: "error"; message: string };
-
-const REVIEW_STEPS = [
-  "Коуч сам решает, какие данные ему нужны: профиль, дневник, рецепты, шаблоны тренировок.",
-  "Safety Reviewer проверяет план на безопасность, реалистичность и соответствие профилю.",
-  "Если есть замечания, план переписывается — до трёх раундов.",
-  "Одобренный план агент сохраняет в файл: до approve этот инструмент ему недоступен.",
-];
+const suggestions = ["Предложи ужин с высоким белком без молочки", "Составь план домашних тренировок на неделю"];
 
 export default function Page() {
-  const [task, setTask] = useState("");
+  const [transport] = useState(() => new DefaultChatTransport<ChatMessage>({
+    api: "/api/chat",
+    prepareSendMessagesRequest: ({ messages }) => ({
+      // Чат хранит историю в памяти, но каждый запуск обрабатывает новую задачу.
+      body: { messages: messages.slice(-1).map((message) => ({
+        role: message.role,
+        parts: message.parts.filter((part) => part.type === "text").map((part) => ({ type: "text", text: part.text })),
+      })) },
+    }),
+  }));
+  const { messages, sendMessage, status, error, clearError } = useChat<ChatMessage>({ transport, throttle: 40 });
+  const [input, setInput] = useState("");
   const [fieldError, setFieldError] = useState<string | null>(null);
-  const [state, setState] = useState<State>({ status: "idle" });
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
-
-  const running = state.status === "running";
-
-  async function handleSubmit(event: React.FormEvent) {
-    event.preventDefault();
-    if (running) return;
-
-    if (!task.trim()) {
-      setFieldError("Введите задачу — например, «составь план питания на завтра».");
-      textareaRef.current?.focus();
-      return;
-    }
-
-    setFieldError(null);
-    setState({ status: "running" });
-    try {
-      const response = await fetch("/api/agent/run", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ task }),
-      });
-      const data = await response.json();
-      if (!response.ok) {
-        setState({ status: "error", message: data.error ?? `Ошибка ${response.status}` });
-        return;
-      }
-      setState({ status: "result", result: data as HealthAgentResult });
-    } catch (err) {
-      setState({ status: "error", message: err instanceof Error ? err.message : "Сеть недоступна" });
-    }
-  }
-
-  return (
-    <main id="main" className="mx-auto w-full max-w-3xl px-4 py-10 sm:px-6 sm:py-14">
-      <header className="mb-8">
-        <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">Health Coach Agent</h1>
-        <p className="text-muted-foreground mt-2 max-w-[60ch] text-sm sm:text-base">
-          Коуч составляет план по профилю и дневнику, Safety Reviewer проверяет его перед выдачей.
-        </p>
-      </header>
-
-      <Card>
-        <CardContent>
-          <form onSubmit={handleSubmit} aria-busy={running} className="space-y-3">
-            <Label htmlFor="task">Задача</Label>
-            <Textarea
-              id="task"
-              name="task"
-              ref={textareaRef}
-              value={task}
-              onChange={(event) => setTask(event.target.value)}
-              disabled={running}
-              rows={4}
-              aria-invalid={fieldError !== null}
-              aria-describedby={fieldError ? "task-error task-hint" : "task-hint"}
-              placeholder="Например: составь план питания на завтра"
-            />
-            {fieldError && (
-              <p id="task-error" className="text-destructive text-sm">
-                {fieldError}
-              </p>
-            )}
-            <p id="task-hint" className="text-muted-foreground text-sm">
-              Один запрос — один ответ. Прогон занимает 1–4 минуты: каждый раунд это два обращения к модели.
-            </p>
-            <Button type="submit" size="lg" disabled={running} className="min-h-11 px-5">
-              {running ? (
-                <>
-                  <Loader2 className="animate-spin" aria-hidden="true" />
-                  Агент работает
-                </>
-              ) : (
-                <>
-                  <Play aria-hidden="true" />
-                  Run Agent
-                </>
-              )}
-            </Button>
-          </form>
-        </CardContent>
-      </Card>
-
-      <div aria-live="polite" className="mt-6">
-        {state.status === "idle" && <EmptyState />}
-        {running && <RunningState />}
-        {state.status === "error" && (
-          <Alert variant="destructive">
-            <AlertTriangle aria-hidden="true" />
-            <AlertTitle>Прогон не удался</AlertTitle>
-            <AlertDescription>{state.message}</AlertDescription>
-          </Alert>
-        )}
-        {state.status === "result" && <Result result={state.result} />}
-      </div>
-    </main>
-  );
-}
-
-function EmptyState() {
-  return (
-    <Card className="bg-muted/40 border-dashed shadow-none">
-      <CardHeader>
-        <CardTitle className="text-base">Как проходит прогон</CardTitle>
-      </CardHeader>
-      <CardContent>
-        <ol className="text-muted-foreground list-decimal space-y-2 pl-5 text-sm">
-          {REVIEW_STEPS.map((step) => (
-            <li key={step}>{step}</li>
-          ))}
-        </ol>
-      </CardContent>
-    </Card>
-  );
-}
-
-/** Счётчик нужен потому, что прогон идёт минутами: без него пауза читается как зависание. */
-function RunningState() {
-  const [seconds, setSeconds] = useState(0);
-  const startedAt = useRef(Date.now());
+  const [atBottom, setAtBottom] = useState(true);
+  const scroller = useRef<HTMLDivElement>(null);
+  const content = useRef<HTMLDivElement>(null);
+  const textarea = useRef<HTMLTextAreaElement>(null);
+  const follow = useRef(true);
+  const sending = useRef(false);
+  const running = status === "submitted" || status === "streaming";
 
   useEffect(() => {
-    const id = setInterval(() => setSeconds(Math.round((Date.now() - startedAt.current) / 1000)), 1000);
-    return () => clearInterval(id);
+    const container = scroller.current;
+    const thread = content.current;
+    if (!container || !thread) return;
+    let frame = 0;
+    const observer = new ResizeObserver(() => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        if (follow.current) container.scrollTop = container.scrollHeight;
+      });
+    });
+    observer.observe(thread);
+    return () => { observer.disconnect(); cancelAnimationFrame(frame); };
   }, []);
 
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="text-muted-foreground flex items-center gap-2 text-sm font-normal">
-          <Loader2 className="size-4 animate-spin" aria-hidden="true" />
-          Агент работает… {seconds} с
-        </CardTitle>
-      </CardHeader>
-      <CardContent className="space-y-3">
-        <Skeleton className="h-4 w-2/5" />
-        <Skeleton className="h-2 w-full" />
-        <Skeleton className="h-2 w-full" />
-        <Separator className="my-4" />
-        <Skeleton className="h-4 w-1/3" />
-        <Skeleton className="h-4 w-full" />
-        <Skeleton className="h-4 w-11/12" />
-        <Skeleton className="h-4 w-4/5" />
-      </CardContent>
-    </Card>
-  );
-}
-
-function Result({ result }: { result: HealthAgentResult }) {
-  const { plan, review, rounds, toolCalls, improved, promptVersions, durationMs } = result;
-  const needsProfessional = review.verdict === "needs_human_professional";
-
-  return (
-    <div className="space-y-4">
-      {needsProfessional && (
-        <Alert variant="destructive">
-          <AlertTriangle aria-hidden="true" />
-          <AlertTitle>Этот запрос требует консультации специалиста</AlertTitle>
-          <AlertDescription>
-            Ревьюер отнёс запрос к медицинским, поэтому план не выдаётся и не сохраняется.
-          </AlertDescription>
-        </Alert>
-      )}
-
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex flex-wrap items-center gap-x-3 gap-y-2 text-base">
-            Safety Review
-            <VerdictBadge verdict={review.verdict} />
-            <span className="text-muted-foreground text-sm font-normal">
-              {verdictConfig[review.verdict].summary}
-            </span>
-          </CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-5">
-          <div className="grid gap-5 sm:grid-cols-2">
-            <ScoreMeter score={review.score} />
-            <RoundsIndicator rounds={rounds.length} />
-          </div>
-
-          <Separator />
-
-          <ReviewIssues issues={review.issues} defaultOpen={needsProfessional} />
-
-          <Separator />
-
-          <div className="space-y-3">
-            <RunMeta durationMs={durationMs} promptVersions={promptVersions} />
-            <RoundsHistory rounds={rounds} improved={improved} />
-          </div>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">Что сделал агент</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <ToolCallsList toolCalls={toolCalls} retrievals={result.retrievals} />
-          {result.saveSummary && (
-            <p className="text-muted-foreground mt-4 text-sm whitespace-pre-wrap [overflow-wrap:anywhere]">
-              {result.saveSummary}
-            </p>
-          )}
-        </CardContent>
-      </Card>
-
-      {!needsProfessional && plan && <PlanCard plan={plan} />}
-    </div>
-  );
-}
-
-function PlanCard({ plan }: { plan: string }) {
-  const [copied, setCopied] = useState(false);
-
   useEffect(() => {
-    if (!copied) return;
-    const id = setTimeout(() => setCopied(false), 2000);
-    return () => clearTimeout(id);
-  }, [copied]);
+    if (!running) textarea.current?.focus({ preventScroll: true });
+  }, [running]);
 
-  async function copyPlan() {
-    try {
-      await navigator.clipboard.writeText(plan);
-      setCopied(true);
-    } catch {
-      setCopied(false);
+  function onScroll() {
+    const container = scroller.current;
+    if (!container) return;
+    const nearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 80;
+    follow.current = nearBottom;
+    setAtBottom(nearBottom);
+  }
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (running || sending.current) return;
+    const text = input.trim();
+    if (!text) { setFieldError("Введите задачу для коуча."); textarea.current?.focus(); return; }
+    sending.current = true;
+    follow.current = true;
+    setAtBottom(true);
+    setFieldError(null);
+    clearError();
+    setInput("");
+    try { await sendMessage({ text }); }
+    finally { sending.current = false; }
+  }
+
+  function onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+      event.preventDefault();
+      event.currentTarget.form?.requestSubmit();
     }
   }
 
+  const lastMessage = messages.at(-1);
+  const lastAssistant = lastMessage?.role === "assistant" ? lastMessage : undefined;
+  const latestStage = lastAssistant ? messageEvents(lastAssistant).reverse().find((event) => event.type === "stage" && event.status === "running") : undefined;
+  const result = lastAssistant ? messageResult(lastAssistant) : undefined;
+  const announcement = error ? "Запуск завершился ошибкой" : running
+    ? latestStage?.type === "stage" ? stageLabels[latestStage.stage] : "Агент работает"
+    : result?.review.verdict === "needs_human_professional" ? "Требуется специалист"
+    : result ? `Запуск завершён: ${result.review.verdict}, ${result.finalScore ?? result.review.score} из 10` : "";
+
   return (
-    <Card>
-      <CardHeader className="flex flex-row items-center justify-between gap-3 space-y-0">
-        <CardTitle className="text-base">План</CardTitle>
-        <Button type="button" variant="outline" size="sm" onClick={copyPlan}>
-          {copied ? <Check aria-hidden="true" /> : <Copy aria-hidden="true" />}
-          {copied ? "Скопировано" : "Копировать"}
-        </Button>
-      </CardHeader>
-      <CardContent>
-        <div className="max-w-[68ch] text-sm leading-relaxed whitespace-pre-wrap">{plan}</div>
-      </CardContent>
-    </Card>
+    <main id="main" className={styles.page}>
+      <header className={styles.header}>
+        <span className={styles.brandIcon}><ChatIcon name="coach" /></span>
+        <div><h1>Health Coach</h1><p>Питание, движение и восстановление</p></div>
+        <span className={styles.sessionNote}>План с проверкой безопасности</span>
+      </header>
+
+      <div className={styles.conversation} ref={scroller} onScroll={onScroll} tabIndex={0} aria-label="Переписка с коучем">
+        <div className={styles.thread} ref={content}>
+          {messages.length === 0 && <section className={styles.empty}>
+            <ChatIcon name="coach" />
+            <h2>С чего начнём сегодня?</h2>
+            <p>Опишите задачу. Коуч учтёт профиль и дневник, найдёт знания и проверит план перед ответом.</p>
+            <div className={styles.suggestions}>{suggestions.map((suggestion) => <button key={suggestion} type="button" onClick={() => { setInput(suggestion); textarea.current?.focus(); }}>{suggestion}</button>)}</div>
+          </section>}
+          {messages.map((message, index) => <ChatMessageView key={message.id} message={message} active={running && index === messages.length - 1 && message.role === "assistant"} failed={status === "error" && index === messages.length - 1} />)}
+          {status === "submitted" && !lastAssistant && <p className={styles.pending}>Подключаю инструменты…</p>}
+          {error && <p className={styles.error}>Не удалось завершить запуск. Проверьте настройки и отправьте задачу ещё раз.</p>}
+          {!atBottom && <button type="button" className={styles.jumpButton} onClick={() => {
+            follow.current = true;
+            setAtBottom(true);
+            scroller.current?.scrollTo({ top: scroller.current.scrollHeight, behavior: "instant" });
+          }}><ChatIcon name="arrow" />К последнему сообщению</button>}
+        </div>
+      </div>
+
+      <div className={styles.composerArea}>
+        <div className={styles.composerInner}>
+          <form onSubmit={submit} aria-busy={running}>
+            <label htmlFor="chat-task" className={styles.composerLabel}>Задача для коуча</label>
+            <div className={styles.composer}>
+              <textarea id="chat-task" name="task" ref={textarea} value={input} onChange={(event) => { setInput(event.target.value); setFieldError(null); }} onKeyDown={onKeyDown} disabled={running} rows={2} maxLength={8000} placeholder="Например, предложи простой ужин…" aria-invalid={!!fieldError} aria-describedby={fieldError ? "chat-error chat-hint" : "chat-hint"} />
+              <button type="submit" className={styles.sendButton} disabled={running} aria-label={running ? "Агент работает" : "Отправить задачу"}>{running ? <span className={styles.spinner} /> : <ChatIcon name="send" />}</button>
+            </div>
+            {fieldError && <p id="chat-error" className={styles.error} role="alert">{fieldError}</p>}
+            <p id="chat-hint" className={styles.composerHint}>Enter — отправить · Shift + Enter — новая строка. История до обновления страницы; каждый запрос — отдельный запуск.</p>
+          </form>
+        </div>
+      </div>
+      <div className={styles.srOnly} role="status" aria-atomic="true">{announcement}</div>
+    </main>
   );
 }

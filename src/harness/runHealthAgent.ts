@@ -26,6 +26,7 @@ import { collectRetrievals } from "./retrievals";
 import type { RetrievalTrace } from "../rag/types";
 import { traceRun } from "./traceRun";
 import { requestReview, type Review } from "./validateReview";
+import { observeToolCalls, safeEventEmitter, type OnRunEvent } from "./events";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ОРКЕСТРАТОР
@@ -108,13 +109,16 @@ type AgentReply = { text: string; toolCalls: string[]; retrievals?: RetrievalTra
 // Возвращает RunResult; нужные поля — finalOutput (текст последнего ответа) и
 // newItems (всё, что произошло за прогон: сообщения, вызовы инструментов и их
 // результаты) — из них собирается трейс вызовов.
-async function ask(agent: Agent, input: string): Promise<AgentReply> {
-  const result = await run(agent, input);
-  return {
-    text: String(result.finalOutput ?? ""),
-    toolCalls: collectToolCalls(result.newItems),
-    retrievals: collectRetrievals(result.newItems),
-  };
+async function ask(agent: Agent, input: string, onEvent?: OnRunEvent, round = 1): Promise<AgentReply> {
+  const unsubscribe = observeToolCalls(agent, onEvent, round);
+  try {
+    const result = await run(agent, input);
+    return {
+      text: String(result.finalOutput ?? ""),
+      toolCalls: collectToolCalls(result.newItems),
+      retrievals: collectRetrievals(result.newItems),
+    };
+  } finally { unsubscribe(); }
 }
 
 const DEFAULT_MAX_ROUNDS = 3;
@@ -145,16 +149,19 @@ export type HealthAgentResult = {
 export async function runHealthAgent(
   task: string,
   maxRounds: number = DEFAULT_MAX_ROUNDS,
+  onEvent?: OnRunEvent,
 ): Promise<HealthAgentResult> {
   const startedAt = Date.now();
+  const emit = safeEventEmitter(onEvent);
   ensureProvider();
 
   // Соединение не глобальное: отдельный stdio-процесс живёт ровно один прогон.
   // finally срабатывает и при ошибке connect, модели или разбора ревью.
   const servers = createMcpServers();
   try {
+    emit?.({ type: "stage", id: "reading-profile", stage: "reading_profile", status: "running" });
     await connectMcpServers(servers);
-    return await runWithMcp(task, maxRounds, servers, startedAt);
+    return await runWithMcp(task, maxRounds, servers, startedAt, emit);
   } finally {
     await closeMcpServers(servers);
   }
@@ -165,6 +172,7 @@ async function runWithMcp(
   maxRounds: number,
   servers: MCPServerStdio[],
   startedAt: number,
+  onEvent?: OnRunEvent,
 ): Promise<HealthAgentResult> {
 
   // Версии промптов фиксируем один раз на прогон: даже если ACTIVE_PROMPTS
@@ -191,6 +199,7 @@ async function runWithMcp(
   // инструментов (см. agents/safetyReviewer.ts). Harness читает MCP resources
   // напрямую: модель в этом не участвует, поэтому это не agent toolCalls.
   const reviewerContext = await readReviewerContext(servers);
+  onEvent?.({ type: "stage", id: "reading-profile", stage: "reading_profile", status: "completed" });
 
   const roundsLog = createRoundsLog();
   const toolCalls: string[] = [];
@@ -234,13 +243,17 @@ async function runWithMcp(
   let issues: string[] = [];
 
   for (let round = 1; round <= maxRounds; round++) {
+    if (round > 1) onEvent?.({ type: "stage", id: `revising-${round}`, stage: "revising", status: "running", round });
+    onEvent?.({ type: "stage", id: `generating-${round}`, stage: "generating_plan", status: "running", round });
     // Коуч получает только задачу: профиль, дневник и рецепты он добирает сам,
     // вызывая MCP tools. Со второго раунда к задаче добавляются прошлый план и
     // замечания ревьюера.
     const coachInput = issues.length
       ? `# ЗАДАЧА\n${task}\n\n# ПРЕДЫДУЩИЙ ПЛАН\n${plan}\n\n# ЗАМЕЧАНИЯ РЕВЬЮЕРА (исправь их и верни план целиком)\n- ${issues.join("\n- ")}`
       : `# ЗАДАЧА\n${task}`;
-    const coachReply = await ask(coach, coachInput);
+    const coachReply = await ask(coach, coachInput, onEvent, round);
+    onEvent?.({ type: "stage", id: `generating-${round}`, stage: "generating_plan", status: "completed", round });
+    if (round > 1) onEvent?.({ type: "stage", id: `revising-${round}`, stage: "revising", status: "completed", round });
     plan = coachReply.text;
     retrievals.push(...(coachReply.retrievals ?? []).map((retrieval) => ({
       ...retrieval, toolCallIndex: retrieval.toolCallIndex + toolCalls.length,
@@ -251,11 +264,16 @@ async function runWithMcp(
     // Каждый run() — независимый вызов без общей памяти между агентами, поэтому
     // план передаём ревьюеру текстом внутри input.
     const reviewInput = `${reviewerContext}\n\n# ЗАПРОС ПОЛЬЗОВАТЕЛЯ\n${task}\n\n# ПЛАН НА ПРОВЕРКУ\n${plan}`;
+    onEvent?.({ type: "stage", id: `reviewing-${round}`, stage: "reviewing_safety", status: "running", round });
     const review = await requestReview(
       async (input) => (await ask(reviewer, input)).text,
       reviewInput,
     );
     roundsLog.record(plan, review);
+    onEvent?.({
+      type: "stage", id: `reviewing-${round}`, stage: "reviewing_safety", status: "completed", round,
+      verdict: review.verdict, score: review.score,
+    });
 
     console.log(
       `\n[Раунд ${round}] verdict=${review.verdict} score=${review.score}` +
@@ -270,9 +288,11 @@ async function runWithMcp(
       return finish(null, review);
     }
     if (review.verdict === "approve") {
-      const saved = await savePhase(servers, coachPrompt, task, plan, review.score);
+      onEvent?.({ type: "stage", id: "final-approved", stage: "final_approved_plan", status: "running", round });
+      const saved = await savePhase(servers, coachPrompt, task, plan, review.score, onEvent, round);
       toolCalls.push(...saved.toolCalls);
       saveSummary = saved.text;
+      onEvent?.({ type: "stage", id: "final-approved", stage: "final_approved_plan", status: "completed", round });
       return finish(plan, review);
     }
     issues = review.issues; // revise → следующий раунд
@@ -294,6 +314,8 @@ async function savePhase(
   task: string,
   plan: string,
   score: number,
+  onEvent?: OnRunEvent,
+  round = 1,
 ): Promise<AgentReply> {
   const document = `# ${task}\n\n_score: ${score}/10_\n\n${plan}`;
   const calls: string[] = [];
@@ -304,6 +326,7 @@ async function savePhase(
     // Держим состояние сами: обычная сетевая ошибка OpenAI API не обязана
     // содержать error.state, хотя предыдущая запись уже могла выполниться.
     const state = new RunState(new RunContext(), input, agent, 10);
+    const unsubscribe = observeToolCalls(agent, onEvent, round);
     try {
       const result = await run(agent, state);
       const reply = { text: String(result.finalOutput ?? ""), toolCalls: collectToolCalls(result.newItems) };
@@ -316,6 +339,8 @@ async function savePhase(
       summaries.push(message);
       console.warn(message);
       return null;
+    } finally {
+      unsubscribe();
     }
   };
 
